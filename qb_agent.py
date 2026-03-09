@@ -42,20 +42,30 @@ class TokenManager:
     """
     Manages QB OAuth tokens in memory.
     Reads from Config (Railway env vars) on init.
-    Refreshes access token automatically when near expiry.
+    Refreshes access token automatically when near expiry or on 401.
+
+    Sets expires_at to 0 on init so the first API call always
+    triggers a proactive refresh — safely handles expired tokens on startup.
     """
 
     def __init__(self):
         self.access_token = Config.QB_ACCESS_TOKEN
         self.refresh_token = Config.QB_REFRESH_TOKEN
-        self.expires_at = time.time() + 3600  # Assume 1hr from start if unknown
+        # Force refresh on first call — handles already-expired tokens on startup
+        self.expires_at = 0
 
     def get_access_token(self) -> str:
         """Return a valid access token, refreshing if necessary."""
         if self._needs_refresh():
-            logger.info("Access token near expiry — refreshing...")
+            logger.info("Access token expired or near expiry — refreshing...")
             self._refresh()
         return self.access_token
+
+    def force_refresh(self):
+        """Force an immediate token refresh — called on 401 responses."""
+        logger.info("401 received — forcing token refresh...")
+        self.expires_at = 0
+        self._refresh()
 
     def _needs_refresh(self) -> bool:
         return time.time() >= (self.expires_at - REFRESH_BUFFER_SECONDS)
@@ -120,10 +130,14 @@ class QBClient:
         }
 
     def get_report(self, report_name: str, params: dict = None) -> dict:
-        """Fetch a QB report by name with optional query params."""
+        """Fetch a QB report by name with optional query params. Retries once on 401."""
         url = f"{self.base_url}/v3/company/{self.company_id}/reports/{report_name}"
         try:
             response = httpx.get(url, headers=self._headers(), params=params or {}, timeout=15)
+            if response.status_code == 401:
+                logger.warning(f"401 on {report_name} — refreshing token and retrying...")
+                _token_manager.force_refresh()
+                response = httpx.get(url, headers=self._headers(), params=params or {}, timeout=15)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
@@ -134,7 +148,7 @@ class QBClient:
             raise Exception("QuickBooks API timed out. Please try again.")
 
     def query(self, sql: str) -> dict:
-        """Run a QB query (SELECT statements)."""
+        """Run a QB query (SELECT statements). Retries once on 401."""
         url = f"{self.base_url}/v3/company/{self.company_id}/query"
         try:
             response = httpx.get(
@@ -143,6 +157,15 @@ class QBClient:
                 params={"query": sql, "minorversion": "65"},
                 timeout=15,
             )
+            if response.status_code == 401:
+                logger.warning("401 on query — refreshing token and retrying...")
+                _token_manager.force_refresh()
+                response = httpx.get(
+                    url,
+                    headers=self._headers(),
+                    params={"query": sql, "minorversion": "65"},
+                    timeout=15,
+                )
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
