@@ -1,4 +1,4 @@
 {
   "build": { "builder": "NIXPACKS" },
-  "deploy": { "startCommand": "python qb_auth.py" }
+  "deploy": { "startCommand": "python app.py" }
 }
