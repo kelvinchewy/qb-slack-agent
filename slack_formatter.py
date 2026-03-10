@@ -48,10 +48,24 @@ def context(text: str) -> dict:
 
 # ─── Dynamic Analysis Formatter ──────────────────────────────────────
 
+COMPLETENESS_EMOJI = {
+    "complete": "🟢",
+    "partial": "🟡",
+    "incomplete": "🔴",
+}
+
+
 def format_dynamic_analysis(analysis: dict) -> list[dict]:
     """
-    Formats qb_analyst output into Slack Block Kit blocks.
-    Handles both simple (summary) and detail (table) responses.
+    Formats qb_analyst output into tight CFO-readable Slack blocks.
+
+    Layout order:
+      1. Header (question + completeness badge)
+      2. Direct answer — 2 sentences max
+      3. Detail table — breakdown before prose for scannability
+      4. Key findings — bullet points
+      5. Proactive flags — warnings
+      6. Footer — completeness + data note + source
     """
     blocks = []
     question = analysis.get("question", "")
@@ -61,50 +75,50 @@ def format_dynamic_analysis(analysis: dict) -> list[dict]:
     has_detail_table = analysis.get("has_detail_table", False)
     detail_table = analysis.get("detail_table")
     data_note = analysis.get("data_note", "")
+    data_completeness = analysis.get("data_completeness", "")
     error = analysis.get("error")
 
     # Error state
     if error and not direct_answer:
         return format_error(f"Couldn't complete that query: {error}")
 
-    # Header — the question asked
-    blocks.append(header(f"🔍 {question[:75]}{'...' if len(question) > 75 else ''}"))
+    # ── 1. Header ─────────────────────────────────────────────────────
+    q_display = question[:70] + ("..." if len(question) > 70 else "")
+    badge = COMPLETENESS_EMOJI.get(data_completeness, "")
+    blocks.append(header(f"🔍 {q_display}" + (f"  {badge}" if badge else "")))
     blocks.append(divider())
 
-    # Direct answer — the most important block
-    blocks.append(section(f"*Answer*\n{direct_answer}"))
+    # ── 2. Direct answer (2 sentences max) ────────────────────────────
+    blocks.append(section(direct_answer))
 
-    # Key findings
-    if key_findings:
-        findings_text = "\n".join(f"• {f}" for f in key_findings)
-        blocks.append(divider())
-        blocks.append(section(f"*Key Findings*\n{findings_text}"))
-
-    # Proactive flags — only shown if something worth flagging
-    if proactive_flags:
-        flags_text = "\n".join(f"⚠️ {f}" for f in proactive_flags)
-        blocks.append(divider())
-        blocks.append(section(f"*Heads Up*\n{flags_text}"))
-
-    # Detail table — rendered as formatted text (Slack doesn't have native tables)
+    # ── 3. Detail table ───────────────────────────────────────────────
     if has_detail_table and detail_table:
-        headers = detail_table.get("headers", [])
+        hdrs = detail_table.get("headers", [])
         rows = detail_table.get("rows", [])
-
-        if headers and rows:
+        if hdrs and rows:
             blocks.append(divider())
-            blocks.append(section(f"*Detail Breakdown* ({len(rows)} items)"))
+            blocks.extend(_render_table(hdrs, rows))
 
-            # Render table rows in batches of 10 (Slack block limit)
-            table_blocks = _render_table(headers, rows)
-            blocks.extend(table_blocks)
+    # ── 4. Key findings ───────────────────────────────────────────────
+    if key_findings:
+        blocks.append(divider())
+        blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
 
-    # Data note / caveat
+    # ── 5. Flags ──────────────────────────────────────────────────────
+    if proactive_flags:
+        blocks.append(divider())
+        blocks.append(section("\n".join(f"⚠️ {f}" for f in proactive_flags)))
+
+    # ── 6. Footer ─────────────────────────────────────────────────────
+    footer_parts = []
+    if data_completeness == "partial":
+        footer_parts.append("🟡 Partial data — some accounts may be missing")
+    elif data_completeness == "incomplete":
+        footer_parts.append("🔴 Incomplete data — treat with caution")
     if data_note:
-        blocks.append(context(f"ℹ️ {data_note}"))
-
-    # Source attribution
-    blocks.append(context("_Data from QuickBooks Online · The Hashing Company_"))
+        footer_parts.append(f"ℹ️ {data_note}")
+    footer_parts.append("_QuickBooks Online · The Hashing Company_")
+    blocks.append(context("  ·  ".join(footer_parts)))
 
     return blocks
 
