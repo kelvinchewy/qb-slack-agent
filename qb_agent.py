@@ -177,6 +177,18 @@ class QBClient:
 _client = QBClient()
 
 
+# ─── Public Interface for qb_interpreter ─────────────────────────────
+
+def get_report(report_name: str, params: dict = None) -> dict:
+    """Public wrapper — fetch a QB report by name."""
+    return _client.get_report(report_name, params)
+
+
+def query(sql: str) -> dict:
+    """Public wrapper — run a QB SQL query."""
+    return _client.query(sql)
+
+
 # ─── Report Helpers ───────────────────────────────────────────────────
 
 def _find_row(rows: list, row_name: str) -> float:

@@ -16,8 +16,9 @@ def classify_intent(user_message: str) -> dict:
     """
     msg = user_message.strip().lower()
 
-    # Only handle help and unknown specially
-    if any(w in msg for w in ["help", "what can you do", "commands", "how do i"]):
+    # Help: only match if the message IS one of these — not if it contains them
+    help_triggers = {"help", "what can you do", "commands", "how do i use this", "how do i use you"}
+    if msg in help_triggers or msg.startswith("help ") and len(msg) < 20:
         return {"route": "fixed", "intent": "help"}
 
     # Everything else goes dynamic

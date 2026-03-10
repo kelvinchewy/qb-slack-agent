@@ -77,39 +77,72 @@ def _classify_intent(question: str) -> str:
 QB_SCHEMA = """
 ## QuickBooks Online — Available Data
 
-### CRITICAL RULE — Expense Categories vs Transactions
-Expense categories (Utilities, Rent, Salaries, Electricity, etc.) ONLY exist in the
-ProfitAndLoss report. They are NEVER returned by SQL queries on Purchase, Bill, or
-any other entity. If the user asks about an expense category or type, always use the
-ProfitAndLoss report — never SQL.
+### QB Data Has Two Layers — Understanding This is Critical
 
-SQL queries on Purchase only return manually-entered payment records (bank transfers,
-vendor payments) — not categorised expense data.
+**Layer 1 — Summary totals (Report API)**
+ProfitAndLoss returns expense category totals only. Example:
+  Utilities → MYR 300,864
+It does NOT tell you which vendor that money went to. No payee names, no individual transactions.
 
-### Report API (use for summaries and expense categories)
+**Layer 2 — Transaction detail (Query API)**
+Bill and Purchase entities contain the individual transactions with vendor names.
+But they do NOT contain category labels like "Utilities" or "Rent".
+
+### When to Chain Both Layers
+If the question asks for BOTH an expense category total AND vendor/payee detail, plan TWO calls:
+1. ProfitAndLoss → get the category total and date range
+2. SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+   → fetch ALL bills for the period, analyst will match line items to the expense category
+
+Chain examples:
+- "breakdown of utilities — who are the payees?" → P&L + all Bills for period
+- "show electricity vendors this quarter" → P&L + all Bills for period
+- "who do we pay for rent?" → P&L + all Bills for period
+- "top expense vendors last month" → P&L for totals + all Bills for period
+
+Do NOT chain if the question only asks for totals/summary (no vendor detail requested).
+
+### Report API (Layer 1 — summaries)
 - ProfitAndLoss — params: start_date, end_date (YYYY-MM-DD)
-  → Returns all income and expense categories including Utilities, Rent, Salaries, COGS etc.
-  → This is the ONLY way to get expense category data
+  → Returns expense category totals: Utilities, Rent, Salaries, COGS etc.
+  → ONLY way to get expense category data
 - BalanceSheet — params: date (YYYY-MM-DD)
 - AgedReceivables — no params required
 - AgedPayables — no params required
 - CashFlow — params: start_date, end_date
 
-### Query API (SQL-style — use ONLY for specific record lookups)
-Use ONLY when looking for specific vendors, customers, invoices, or bills by name/ID.
-NEVER use for expense category analysis.
+### Query API — SQL-style (Layer 2 — individual records)
+**Bill** — vendor bills the company owes or has paid
+  - VendorRef.name, TxnDate, DueDate, TotalAmt, Balance, AccountRef.name
+  - Filter by account: WHERE AccountRef.name LIKE '%Utilities%'
+  - Filter by date: WHERE TxnDate >= '2026-01-01' AND TxnDate <= '2026-03-31'
 
-**Bill** — money the company OWES vendors
-  - VendorRef.name, TxnDate, DueDate, TotalAmt, Balance
-
-**Invoice** — money OWED to the company
+**Invoice** — money owed TO the company by customers
   - CustomerRef.name, TxnDate, DueDate, TotalAmt, Balance
 
-**Purchase** — outgoing payment records only (NOT expense categories)
-  - Use only for: "show me payments to vendor X", "bank transfers", specific payment lookup
-  - Do NOT use for: utility expenses, rent, salaries, or any cost category
+**Purchase** — outgoing payment records (bank transfers, card payments)
+  - Use ONLY for: "show me payments to vendor X", specific payment lookups
+  - Do NOT use for expense category analysis
 
 **Vendor** / **Customer** / **Account** — entity lookups
+
+### QB SQL — What is and isn't filterable on Bill
+
+Bill HEADER fields (safe to filter on):
+  VendorRef.name, TxnDate, DueDate, TotalAmt, Balance, DocNumber
+
+Bill LINE ITEM fields (NOT filterable — causes 400 error):
+  AccountRef.name ← NEVER use this as a WHERE filter
+
+CRITICAL: You CANNOT filter Bills by account name in SQL. It lives on line items, not the header.
+
+CORRECT approach for vendor/payee breakdown by expense category:
+  Fetch ALL bills for the date range with no account filter:
+  SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+
+Then the analyst will identify which bills relate to the expense category from the line item data returned.
+
+NEVER generate: WHERE AccountRef.name LIKE '%anything%' — this always returns 400 Bad Request.
 
 ### Date format: YYYY-MM-DD
 """
@@ -125,17 +158,36 @@ Today is {TODAY}.
 Generate a JSON plan for fetching the data needed to answer the question.
 
 DECISION RULES:
-1. Expense category question (utilities, rent, electricity, any cost type) → ProfitAndLoss report
-2. Balance sheet / financial position → BalanceSheet report
-3. Who owes us / outstanding invoices → AgedReceivables report
-4. What we owe / upcoming bills → AgedPayables report
-5. Specific vendor bills by name → SQL query on Bill
-6. Specific customer invoices by name → SQL query on Invoice
-7. Cash / bank balances → BalanceSheet report
+1. Expense category total only (no vendor detail asked) → ProfitAndLoss report only
+2. Expense category + vendor/payee detail → Chain: ProfitAndLoss THEN Bill query on that account
+3. Balance sheet / financial position → BalanceSheet report
+4. Who owes us / outstanding invoices → AgedReceivables report
+5. What we owe / upcoming bills → AgedPayables report
+6. Specific vendor bills by name → SQL query on Bill with VendorRef filter
+7. Specific customer invoices by name → SQL query on Invoice
+8. Cash / bank balances → BalanceSheet report
+9. Top expense vendors / who do we pay for X → Chain: ProfitAndLoss THEN Bill query
 
-Output format:
-{{
-  "call_type": "report" | "query" | "multi",
+CHAINING RULE:
+When question asks who/which vendor/payee is behind an expense category, always chain:
+  Call 1: ProfitAndLoss for the date range (gets the category total)
+  Call 2: SELECT * FROM Bill WHERE TxnDate >= '<start>' AND TxnDate <= '<end>' ORDERBY TxnDate DESC MAXRESULTS 100
+          (fetch ALL bills — analyst will identify which relate to the category)
+
+DO NOT filter by AccountRef.name — that field is on line items, not the Bill header.
+Filtering by it causes a 400 Bad Request error.
+
+Examples of chained questions:
+- "utilities breakdown — who are the payees" → P&L + all Bills for that date range
+- "who do we pay for electricity" → P&L + all Bills for that date range  
+- "rent vendors" → P&L + all Bills for that date range
+- "top expense vendors last month" → P&L for last month + all Bills last month
+
+DEFAULT DATE RULE:
+If no date or period is specified, default to the current calendar month:
+  start_date = first day of current month
+  end_date = today ({TODAY_ISO})
+For balance sheet with no date specified, use today.
   "calls": [
     {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}},
     {{"type": "query", "sql": "SELECT * FROM Bill WHERE VendorRef.name = 'X'"}}
@@ -151,7 +203,7 @@ Respond ONLY with valid JSON. No markdown, no backticks.
 
 FORECAST_SYSTEM = f"""You are a QuickBooks query generator for a Bitcoin mining company.
 
-Today is {TODAY}. Current month start: first day of this month.
+Today is {TODAY}. Today's date in ISO format: {TODAY_ISO}.
 
 {QB_SCHEMA}
 
@@ -161,18 +213,19 @@ across multiple months. Never use SQL queries for trend/forecast questions.
 Generate a plan that fetches ProfitAndLoss for each relevant month separately.
 This gives the analyst a proper time series to work with.
 
-For "past 3 months": fetch the 3 most recently completed months separately.
-For "past 6 months": fetch the 6 most recently completed months separately.
-For "forecast this month": fetch the past 3 completed months.
-For "cashflow next 30 days": fetch past 3 months P&L + AgedPayables.
+DYNAMIC DATE CALCULATION — always calculate from today ({TODAY_ISO}):
+- "past 3 months" = the 3 most recently COMPLETED calendar months before today
+- "past 6 months" = the 6 most recently COMPLETED calendar months before today
+- "forecast this month" = past 3 completed months
+- "cashflow next 30 days" = past 3 completed months + AgedPayables
+- Never include the current partial month as a completed month
 
-Month date ranges (use exact first/last day of each month):
-- Feb 2026: 2026-02-01 to 2026-02-28
-- Jan 2026: 2026-01-01 to 2026-01-31
-- Dec 2025: 2025-12-01 to 2025-12-31
-- Nov 2025: 2025-11-01 to 2025-11-30
-- Oct 2025: 2025-10-01 to 2025-10-31
-- Sep 2025: 2025-09-01 to 2025-09-30
+To calculate: take today's month, go back N months, use exact first/last day of each month.
+Example if today is March 10 2026:
+  Past 3 months = Feb 2026 (2026-02-01 to 2026-02-28), Jan 2026 (2026-01-01 to 2026-01-31), Dec 2025 (2025-12-01 to 2025-12-31)
+  Past 6 months = Feb, Jan, Dec, Nov, Oct, Sep
+
+Always use exact calendar month boundaries. February ends on 28 (non-leap) or 29 (leap year).
 
 Output format:
 {{
@@ -222,10 +275,10 @@ def _execute_calls(plan: dict) -> list:
         try:
             if call["type"] == "report":
                 params = {**call.get("params", {}), "minorversion": "65"}
-                data = qb_agent._client.get_report(call["report_name"], params)
+                data = qb_agent.get_report(call["report_name"], params)
                 results.append({"call": call, "data": data, "error": None})
             elif call["type"] == "query":
-                data = qb_agent._client.query(call["sql"])
+                data = qb_agent.query(call["sql"])
                 results.append({"call": call, "data": data, "error": None})
         except Exception as e:
             logger.error(f"QB call failed: {call} — {e}")

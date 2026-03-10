@@ -1,11 +1,14 @@
 """
 QB Slack Agent — Main entry point.
 Slack Bolt app using Socket Mode.
-Listens for @mentions and DMs, routes through orchestrator → report builder.
+
+Responds immediately to avoid Slack's 3-second timeout,
+then processes the query and posts the result as a follow-up.
 """
 
 import logging
 import re
+import threading
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -33,54 +36,86 @@ def strip_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def handle_query(message_text: str, say, thread_ts: str = None):
-    clean_text = strip_mention(message_text)
+def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
+    """
+    Runs in a background thread — does the heavy lifting after Slack ack.
+    Posts the result directly to the channel/thread.
+    """
+    try:
+        clean_text = strip_mention(user_message)
 
-    if not clean_text:
-        say(
-            text="Hey! Ask me a financial question, or type *help* to see what I can do.",
+        if not clean_text:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text="Hey! Ask me a financial question, or type *help* to see what I can do.",
+            )
+            return
+
+        logger.info(f"Processing query: '{clean_text}'")
+
+        intent_data = classify_intent(clean_text)
+        intent_data["original_question"] = clean_text
+
+        logger.info(f"Route: {intent_data.get('route')} | Intent: {intent_data.get('intent')}")
+
+        blocks = build_report(intent_data)
+
+        client.chat_postMessage(
+            channel=channel,
             thread_ts=thread_ts,
+            blocks=blocks,
+            text=f"Finance report: {intent_data.get('intent', 'query')}",
         )
-        return
 
-    logger.info(f"Processing query: '{clean_text}'")
-
-    # Step 1: Classify intent — fixed or dynamic route
-    intent_data = classify_intent(clean_text)
-
-    # Pass original question through so dynamic pipeline can use it
-    intent_data["original_question"] = clean_text
-
-    logger.info(f"Route: {intent_data.get('route')} | Intent: {intent_data.get('intent')}")
-
-    # Step 2: Build report
-    blocks = build_report(intent_data)
-
-    # Step 3: Send to Slack
-    say(
-        blocks=blocks,
-        text=f"Finance report: {intent_data.get('intent', 'query')}",
-        thread_ts=thread_ts,
-    )
+    except Exception as e:
+        logger.error(f"Query processing error: {e}")
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text="Something went wrong. Please try again.",
+            )
+        except Exception:
+            pass
 
 
 @app.event("app_mention")
-def handle_mention(event, say):
-    logger.info(f"Mention from {event.get('user')}: {event.get('text')}")
-    handle_query(
-        message_text=event.get("text", ""),
-        say=say,
-        thread_ts=event.get("ts"),
+def handle_mention(event, ack, client):
+    ack()  # Acknowledge immediately — avoids Slack 3s timeout
+    thread_ts = event.get("ts")
+    channel = event.get("channel")
+    user_message = event.get("text", "")
+
+    logger.info(f"Mention from {event.get('user')}: {user_message}")
+
+    t = threading.Thread(
+        target=process_and_reply,
+        args=(client, channel, thread_ts, user_message),
+        daemon=True,
     )
+    t.start()
 
 
 @app.event("message")
-def handle_dm(event, say):
+def handle_dm(event, ack, client):
+    ack()  # Acknowledge immediately
     if event.get("bot_id") or event.get("subtype"):
         return
-    if event.get("channel_type") == "im":
-        logger.info(f"DM from {event.get('user')}: {event.get('text')}")
-        handle_query(message_text=event.get("text", ""), say=say)
+    if event.get("channel_type") != "im":
+        return
+
+    channel = event.get("channel")
+    user_message = event.get("text", "")
+
+    logger.info(f"DM from {event.get('user')}: {user_message}")
+
+    t = threading.Thread(
+        target=process_and_reply,
+        args=(client, channel, None, user_message),
+        daemon=True,
+    )
+    t.start()
 
 
 if __name__ == "__main__":

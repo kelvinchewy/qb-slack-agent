@@ -50,11 +50,14 @@ Respond with this JSON:
 
 You will also receive a "Query intent" field — either RETRIEVAL or FORECAST_TREND.
 
-For RETRIEVAL:
-- Describe what you actually see in the QB data using real account names
-- Balance sheet / P&L: breakdown table with % of total column
-- Transaction lists: Date, Vendor/Customer, Amount, Status columns
-- Cash/AR/AP: sorted by amount descending
+For RETRIEVAL with chained calls (P&L + Bill query together):
+- Use the P&L result for the expense category total
+- The Bill query returns ALL bills for the period — scan each bill's line items for the relevant account name
+- Build the vendor table from bills whose line items match the expense category (e.g. "Utilities", "Rent")
+- Detail table: Vendor, Date, Amount, Status — sorted by amount descending
+- If no bills match the category: say "No Bills recorded under this category in QB for this period — expenses may be entered via bank feed (Purchase entity) rather than as vendor Bills"
+- If Bill query returned zero records at all: say "No Bills found for this period in QB"
+- Never say "query limitations" or "API restrictions" — explain specifically what was found and what wasn't
 
 For FORECAST_TREND:
 - State the trend first: "Utilities averaged MYR 194K/month over 3 months"
@@ -148,9 +151,13 @@ def analyse(interpreter_result: dict) -> dict:
 def _build_data_context(results: list) -> str:
     """
     Convert raw QB API results into a readable context string for Claude.
-    Trims oversized responses to avoid context overflow.
+    Applies a per-call character budget to prevent context overflow on
+    multi-month forecast queries (6 P&L reports = ~48K chars uncapped).
     """
+    # Budget: 6000 chars per call, max 10 calls = 60K total (safe for Claude context)
+    PER_CALL_BUDGET = 6000
     parts = []
+
     for i, result in enumerate(results):
         call = result.get("call", {})
         data = result.get("data")
@@ -164,10 +171,8 @@ def _build_data_context(results: list) -> str:
             parts.append(f"[Call {i+1}: {call.get('type')} — No data returned]")
             continue
 
-        # For query results, extract the entity list
         if call.get("type") == "query":
             query_response = data.get("QueryResponse", {})
-            # Find the first non-metadata key (the entity list)
             entity_data = {k: v for k, v in query_response.items()
                           if k not in ("startPosition", "maxResults", "totalCount")}
 
@@ -175,21 +180,23 @@ def _build_data_context(results: list) -> str:
             entity_name = list(entity_data.keys())[0] if entity_data else "unknown"
             items = entity_data.get(entity_name, [])
 
-            parts.append(f"[Call {i+1}: Query — {entity_name}, {total_count} total results, returning {len(items)}]")
+            parts.append(f"[Call {i+1}: Query — {entity_name}, {total_count} total, returning {len(items[:50])}]")
+            raw = json.dumps({entity_name: items[:50]}, indent=2)
+            if len(raw) > PER_CALL_BUDGET:
+                raw = raw[:PER_CALL_BUDGET] + "\n... [truncated]"
+            parts.append(raw)
 
-            # Include full data but cap at 50 items to avoid context overflow
-            capped = items[:50]
-            parts.append(json.dumps({entity_name: capped}, indent=2))
-
-        # For report results, include the full report (they're already structured)
         elif call.get("type") == "report":
             report_name = call.get("report_name", "Report")
-            parts.append(f"[Call {i+1}: Report — {report_name}]")
-            # Reports can be large — include but truncate raw rows if massive
-            report_str = json.dumps(data, indent=2)
-            if len(report_str) > 8000:
-                report_str = report_str[:8000] + "\n... [truncated for length]"
-            parts.append(report_str)
+            params = call.get("params", {})
+            label = f"{report_name}"
+            if "start_date" in params:
+                label += f" ({params['start_date']} to {params.get('end_date', '')})"
+            parts.append(f"[Call {i+1}: Report — {label}]")
+            raw = json.dumps(data, indent=2)
+            if len(raw) > PER_CALL_BUDGET:
+                raw = raw[:PER_CALL_BUDGET] + "\n... [truncated]"
+            parts.append(raw)
 
     return "\n\n".join(parts) if parts else "No data was returned from QuickBooks."
 
