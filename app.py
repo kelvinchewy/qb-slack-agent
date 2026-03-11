@@ -9,6 +9,7 @@ then processes the query and posts the result as a follow-up.
 import logging
 import re
 import threading
+from flask import Flask, request, jsonify
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -118,7 +119,32 @@ def handle_dm(event, ack, client):
     t.start()
 
 
+http_app = Flask(__name__)
+
+
+@http_app.route("/query", methods=["POST"])
+def query():
+    data = request.json
+    question = data.get("query", "")
+    if not question:
+        return jsonify({"error": "Missing 'query' field"}), 400
+    try:
+        from qb_interpreter import interpret_and_fetch
+        from qb_analyst import analyse
+        interpreter_result = interpret_and_fetch(question)
+        analysis = analyse(interpreter_result)
+        return jsonify({"answer": analysis})
+    except Exception as e:
+        logger.error(f"HTTP query error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     logger.info("⚡ QB Slack Agent is starting...")
+    threading.Thread(
+        target=lambda: http_app.run(port=3000, use_reloader=False),
+        daemon=True,
+    ).start()
+    logger.info("🌐 HTTP endpoint listening on port 3000")
     handler = SocketModeHandler(app, Config.SLACK_APP_TOKEN)
     handler.start()
