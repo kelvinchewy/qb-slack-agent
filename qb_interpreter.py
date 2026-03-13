@@ -111,11 +111,23 @@ Do NOT chain if the question only asks for totals/summary (no vendor detail requ
 - AgedPayables — no params required
 - CashFlow — params: start_date, end_date
 
-### TERMINOLOGY — "Invoice" vs "Bill"
-Users often say "invoice" loosely. Interpret carefully:
-- "show me expense invoices", "bills we received", "vendor invoices", "what we owe" → QB Bill entity (AP)
-- "invoices we sent", "customer invoices", "who owes us", "our sales invoices" → QB Invoice entity (AR)
-- When ambiguous, prefer Bill — this is an expense-heavy mining company, most queries are about costs
+### TERMINOLOGY — Standard Accounting Conventions
+Follow standard accounting terminology strictly:
+
+**Invoice** = QB Invoice entity (Accounts Receivable)
+  - Documents YOU issue to customers requesting payment
+  - "show me invoices", "invoices we sent", "what customers owe us"
+  - Use the CUSTOMER list to match names
+
+**Bill** = QB Bill entity (Accounts Payable)  
+  - Documents VENDORS send you requesting payment
+  - "show me bills", "bills we owe", "vendor bills", "what we owe"
+  - Use the VENDOR list to match names
+
+If a name is mentioned, cross-reference the VENDOR and CUSTOMER lists below to determine correct entity:
+- Name in VENDOR list → Bill query
+- Name in CUSTOMER list → Invoice query
+- Name in both → use context (invoice = AR, bill = AP)
 
 ### Query API — SQL-style (Layer 2 — individual records)
 
@@ -175,8 +187,9 @@ DECISION RULES:
    - When in doubt — fetch ALL bills. Never miss records due to a name mismatch.
    - LIKE keyword: extract the most distinctive word. "S And E Trading" → LIKE '%S%E%'. "Intuit Quickbooks" → LIKE '%quickbooks%'. "lawyer fees" → fetch ALL (description, not a name).
 7. All bills for a period / "expense invoices" / "vendor invoices" → SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-8. Customer invoices (AR) for a period → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-9. Specific customer invoices by name → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' (analyst filters by name — never use CustomerRef.name in WHERE)
+8. Specific vendor name (from VENDOR list) → SELECT * FROM Bill WHERE VendorRef.name = 'exact QB name' AND TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+9. Customer invoices (AR) for a period → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+10. Specific customer name (from CUSTOMER list) → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100 (analyst filters by name)
 10. Cash / bank balances → BalanceSheet report
 11. Top expense vendors / who do we pay for X → Chain: ProfitAndLoss THEN Bill query
 
@@ -573,7 +586,7 @@ def _build_entity_context() -> str:
         lines = []
 
         if vendors:
-            lines.append("REAL QB VENDOR NAMES (use exact name in SQL):")
+            lines.append("REAL QB VENDOR NAMES — AP (Accounts Payable) — use Bill entity for these:")
             for v in vendors:
                 lines.append(f"  - {v}")
             vendor_examples = _generate_name_examples(vendors)
@@ -582,13 +595,15 @@ def _build_entity_context() -> str:
                 lines.extend(vendor_examples)
 
         if customers:
-            lines.append("\nREAL QB CUSTOMER NAMES (use exact name in SQL):")
+            lines.append("\nREAL QB CUSTOMER NAMES — AR (Accounts Receivable) — use Invoice entity for these:")
             for c in customers:
                 lines.append(f"  - {c}")
             customer_examples = _generate_name_examples(customers)
             if customer_examples:
                 lines.append("\nCustomer fuzzy match examples (user shorthand → exact QB name):")
                 lines.extend(customer_examples)
+
+        lines.append("\nCROSS-REFERENCE RULE: If a name appears in the VENDOR list → use Bill. If in CUSTOMER list → use Invoice.")
 
         return "\n".join(lines)
     except Exception as e:
