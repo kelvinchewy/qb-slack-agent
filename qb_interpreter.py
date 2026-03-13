@@ -132,10 +132,10 @@ If a name is mentioned, cross-reference the VENDOR and CUSTOMER lists below to d
 ### Query API — SQL-style (Layer 2 — individual records)
 
 **Bill** — vendor bills the company owes or has paid (ACCOUNTS PAYABLE)
-  Safe header fields to filter on: VendorRef.name, TxnDate, DueDate, TotalAmt, Balance, DocNumber
-  Filter by vendor: WHERE VendorRef.name = 'Vendor Name'
-  Filter by date: WHERE TxnDate >= '2026-01-01' AND TxnDate <= '2026-03-31'
-  Fetch all for period: SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+  Safe header fields to filter on: TxnDate, DueDate, TotalAmt, Balance, DocNumber
+  NEVER filter by VendorRef.name — causes 400 Bad Request, same as AccountRef.name
+  Always fetch by date range: SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+  Analyst will filter by vendor name from the returned data.
 
 **Invoice** — money owed TO the company by customers (ACCOUNTS RECEIVABLE)
   Safe header fields to filter on: TxnDate, DueDate, TotalAmt, Balance, DocNumber
@@ -151,8 +151,8 @@ If a name is mentioned, cross-reference the VENDOR and CUSTOMER lists below to d
 
 ### QB SQL — Filterable fields (CRITICAL — wrong fields cause 400 errors)
 
-Bill HEADER fields (safe to filter): VendorRef.name, TxnDate, DueDate, TotalAmt, Balance, DocNumber
-Bill LINE ITEM fields (NOT filterable): AccountRef.name ← NEVER use as WHERE filter
+Bill fields safe to filter: TxnDate, DueDate, TotalAmt, Balance, DocNumber
+Bill fields NOT filterable (cause 400): VendorRef.name, AccountRef.name ← NEVER use in WHERE
 
 Invoice HEADER fields (safe to filter): TxnDate, DueDate, TotalAmt, Balance, DocNumber
 Invoice LINE ITEM fields (NOT filterable): CustomerRef.name ← NEVER use as WHERE filter
@@ -181,17 +181,28 @@ DECISION RULES:
 3. Balance sheet / financial position → BalanceSheet report
 4. "Who owes us" / outstanding AR / customer invoices we sent → AgedReceivables report
 5. "What we owe" / upcoming AP / vendor bills → AgedPayables report
-6. Specific vendor bills by name →
-   - If name is long and specific (full company name): WHERE VendorRef.name LIKE '%keyword%' AND TxnDate >= 'X' AND TxnDate <= 'Y'
-   - If name is short, ambiguous, or a description (e.g. "lawyer", "S&E", "quickbooks", "internet"): fetch ALL bills for the period, analyst will fuzzy-match
-   - When in doubt — fetch ALL bills. Never miss records due to a name mismatch.
-   - LIKE keyword: extract the most distinctive word. "S And E Trading" → LIKE '%S%E%'. "Intuit Quickbooks" → LIKE '%quickbooks%'. "lawyer fees" → fetch ALL (description, not a name).
+6. Specific vendor bills by name → fetch ALL bills for the period by date range only
+   NEVER use VendorRef.name in WHERE — it causes 400 Bad Request
+   Always: SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+   The analyst will filter by the resolved vendor name from the returned data.
 7. All bills for a period / "expense invoices" / "vendor invoices" → SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-8. Specific vendor name (from VENDOR list) → SELECT * FROM Bill WHERE VendorRef.name = 'exact QB name' AND TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+8. Specific vendor name (from VENDOR list) → same as rule 6 — date-range-only Bill query
 9. Customer invoices (AR) for a period → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-10. Specific customer name (from CUSTOMER list) → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100 (analyst filters by name)
-10. Cash / bank balances → BalanceSheet report
-11. Top expense vendors / who do we pay for X → Chain: ProfitAndLoss THEN Bill query
+10. Specific customer name → same as rule 9 — date-range-only Invoice query, analyst filters by name
+11. Cash / bank balances → BalanceSheet report
+12. Top vendors by spend / "who do we pay the most" / "biggest vendors" →
+    Chain: ProfitAndLoss for period + Bill query for same period
+    Analyst ranks vendors by total bill amount from the Bill results.
+13. Transactions above a threshold / "transactions over $X" / "large payments" →
+    SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' AND TotalAmt > 'N' ORDERBY TotalAmt DESC MAXRESULTS 100
+    TotalAmt IS filterable on Bill. Use the numeric value from the question. Default currency match.
+14. New vendors / "vendors we started paying" / "new suppliers" →
+    Chain: Bill query for the CURRENT period + Bill query for the PRIOR period (same length)
+    Analyst compares vendor sets to identify vendors that appear in current but not prior period.
+    Use two separate calls with different date ranges.
+15. BillPayment / "payments made to" / "when did we pay" / "payment history" →
+    SELECT * FROM BillPayment WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+    BillPayment records actual payment transactions (cheques, bank transfers) against bills.
 
 CHAINING RULE:
 When question asks who/which vendor/payee is behind an expense category, always chain:
@@ -200,16 +211,21 @@ When question asks who/which vendor/payee is behind an expense category, always 
           (fetch ALL bills — analyst will identify which relate to the category)
 
 CRITICAL FILTER RULES — these fields cause 400 errors if used in WHERE:
+  VendorRef.name — NEVER filter Bills by this
   AccountRef.name — NEVER filter Bills by this
   CustomerRef.name — NEVER filter Invoices by this
-Always fetch by date range only, let analyst match by name from returned data.
+Always fetch Bills/Invoices by date range only. TotalAmt IS safe to filter.
 
 Examples:
 - "show me all expense invoices Jan 26" → Bill query for Jan 2026 date range
+- "bills from TM Technology" → Bill query for default period, analyst filters by resolved name
 - "S And E Trading invoices" → Invoice query for date range, analyst finds S&E records
 - "utilities breakdown — who are the payees" → P&L + Bill query for date range
 - "who do we pay for electricity" → P&L + Bill query for date range
-- "top expense vendors last month" → P&L for last month + Bill query last month
+- "top vendors by spend last quarter" → P&L + Bill query for last quarter
+- "all transactions over MYR 50000 this month" → Bill query with TotalAmt > 50000
+- "new vendors this quarter" → Bill query this quarter + Bill query last quarter (two calls)
+- "when did we last pay Northstar" → BillPayment query for last 6 months
 
 ENTITY NAME MATCHING RULE:
 When the user mentions a vendor or customer name, match it against the REAL QB NAMES list
@@ -224,7 +240,7 @@ If no date or period is specified, default to the current calendar month:
 For balance sheet with no date specified, use today.
   "calls": [
     {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}},
-    {{"type": "query", "sql": "SELECT * FROM Bill WHERE VendorRef.name = 'X'"}}
+    {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-02-01' AND TxnDate <= '2026-02-28' ORDERBY TxnDate DESC MAXRESULTS 100"}}
   ],
   "query_complexity": "simple" | "detail",
   "reasoning": "brief note"
@@ -408,6 +424,13 @@ def _fetch_all_customers() -> list[str]:
         return []
 
 
+def refresh_entity_cache():
+    """Force a refresh of the vendor/customer cache. Call after adding new vendors/customers in QB."""
+    global _entity_cache
+    _entity_cache = {"vendors": [], "customers": [], "context": "", "loaded": False}
+    logger.info("Entity cache cleared — will refresh on next query.")
+
+
 def _resolve_vendor_name(user_term: str, vendor_list: list[str]) -> list[str] | None:
     """
     Use Haiku to fuzzy-match user input against real QB vendor names.
@@ -464,79 +487,6 @@ def _resolve_customer_name(user_term: str, customer_list: list[str]) -> list[str
         return None
 
 
-def _needs_vendor_resolution(plan: dict) -> bool:
-    """Check if any call in the plan uses a VendorRef.name filter."""
-    for call in plan.get("calls", []):
-        if call.get("type") == "query":
-            sql = call.get("sql", "").lower()
-            if "vendorref.name" in sql:
-                return True
-    return False
-
-
-def _needs_customer_resolution(plan: dict) -> bool:
-    """Check if any Invoice call could benefit from customer name resolution."""
-    for call in plan.get("calls", []):
-        if call.get("type") == "query":
-            sql = call.get("sql", "").lower()
-            if "from invoice" in sql:
-                return True
-    return False
-
-
-def _extract_vendor_term(sql: str) -> str:
-    """Extract the vendor search term from a SQL string."""
-    import re
-    # Match: VendorRef.name LIKE '%term%' or VendorRef.name = 'term'
-    match = re.search(r"vendorref\.name\s+(?:like\s+'%?([^%']+)%?'|=\s+'([^']+)')", sql, re.IGNORECASE)
-    if match:
-        return (match.group(1) or match.group(2) or "").strip()
-    return ""
-
-
-def _rewrite_plan_with_vendor(plan: dict, vendor_names: list[str], date_range: dict) -> dict:
-    """Rewrite plan calls using resolved vendor names."""
-    new_calls = []
-    for call in plan.get("calls", []):
-        if call.get("type") == "query" and "vendorref.name" in call.get("sql", "").lower():
-            # Build one query per matched vendor, or a combined LIKE query
-            if len(vendor_names) == 1:
-                start = date_range.get("start", "")
-                end = date_range.get("end", "")
-                name = vendor_names[0].replace("'", "\'")
-                if start and end:
-                    sql = f"SELECT * FROM Bill WHERE VendorRef.name = '{name}' AND TxnDate >= '{start}' AND TxnDate <= '{end}' ORDERBY TxnDate DESC MAXRESULTS 100"
-                else:
-                    sql = f"SELECT * FROM Bill WHERE VendorRef.name = '{name}' ORDERBY TxnDate DESC MAXRESULTS 100"
-            else:
-                # Multiple matches — fetch all bills for period, analyst will filter
-                start = date_range.get("start", "")
-                end = date_range.get("end", "")
-                if start and end:
-                    sql = f"SELECT * FROM Bill WHERE TxnDate >= '{start}' AND TxnDate <= '{end}' ORDERBY TxnDate DESC MAXRESULTS 100"
-                else:
-                    sql = "SELECT * FROM Bill ORDERBY TxnDate DESC MAXRESULTS 100"
-            new_calls.append({**call, "sql": sql, "resolved_vendors": vendor_names})
-        else:
-            new_calls.append(call)
-    return {**plan, "calls": new_calls}
-
-
-def _extract_date_range_from_plan(plan: dict) -> dict:
-    """Extract start/end dates from plan calls."""
-    import re
-    for call in plan.get("calls", []):
-        sql = call.get("sql", "")
-        start_match = re.search(r"TxnDate\s*>=\s*'([^']+)'", sql)
-        end_match = re.search(r"TxnDate\s*<=\s*'([^']+)'", sql)
-        if start_match or end_match:
-            return {
-                "start": start_match.group(1) if start_match else "",
-                "end": end_match.group(1) if end_match else ""
-            }
-    return {}
-
-
 def _generate_name_examples(names: list[str]) -> list[str]:
     """
     Dynamically generate fuzzy match examples from real QB names.
@@ -574,15 +524,27 @@ def _generate_name_examples(names: list[str]) -> list[str]:
     return examples
 
 
+# Module-level cache — fetched once per process, refreshed if empty
+_entity_cache: dict = {"vendors": [], "customers": [], "context": "", "loaded": False}
+
+
 def _build_entity_context() -> str:
     """
-    Fetch real vendor and customer names from QB and format as context for the planner.
-    Includes dynamically generated fuzzy match examples so the planner understands
-    what shorthand maps to which exact name — no hardcoding.
+    Fetch real vendor and customer names from QB and return as planner context.
+    Cached at module level — fetched once per process startup, not on every query.
     """
+    global _entity_cache
+
+    # Return cached version if already loaded
+    if _entity_cache["loaded"] and _entity_cache["context"]:
+        return _entity_cache["context"]
+
     try:
         vendors = _fetch_all_vendors()
         customers = _fetch_all_customers()
+        _entity_cache["vendors"] = vendors
+        _entity_cache["customers"] = customers
+        _entity_cache["loaded"] = True
         lines = []
 
         if vendors:
@@ -605,10 +567,12 @@ def _build_entity_context() -> str:
 
         lines.append("\nCROSS-REFERENCE RULE: If a name appears in the VENDOR list → use Bill. If in CUSTOMER list → use Invoice.")
 
-        return "\n".join(lines)
+        context = "\n".join(lines)
+        _entity_cache["context"] = context
+        return context
     except Exception as e:
         logger.warning(f"Could not fetch entity lists: {e}")
-        return ""
+        return _entity_cache.get("context", "")  # Return stale cache if available
 
 
 def _plan_calls(question: str, intent: str) -> dict:
@@ -667,10 +631,10 @@ def interpret_and_fetch(user_question: str) -> dict:
     """
     Main entry point.
 
-    Step 0: Classify intent (RETRIEVAL vs FORECAST_TREND)
-    Step 1: Plan QB API calls based on classification
-    Step 1.5: Vendor/customer name resolution via Haiku (if needed)
-    Step 2: Execute calls
+    Step 0:   Classify intent (RETRIEVAL vs FORECAST_TREND)
+    Step 0.5: Detect + resolve any vendor/customer name mentioned in the question
+    Step 1:   Plan QB API calls (entity context injected so planner uses exact QB names)
+    Step 2:   Execute calls
     Returns structured result for qb_analyst.
     """
     logger.info(f"Interpreting: '{user_question}'")
@@ -678,7 +642,30 @@ def interpret_and_fetch(user_question: str) -> dict:
     # Step 0 — Classify intent
     intent = _classify_intent(user_question)
 
-    # Step 1 — Plan (entity context injected automatically inside _plan_calls)
+    # Step 0.5 — Detect and resolve entity name
+    # Even though the planner has entity context, we resolve separately so the
+    # analyst always receives the matched QB name(s) explicitly.
+    resolved_vendors = []
+    resolved_customers = []
+    entity = _detect_entity(user_question)
+    if entity.get("type") == "vendor" and entity.get("term"):
+        vendor_list = _fetch_all_vendors()
+        matches = _resolve_vendor_name(entity["term"], vendor_list)
+        if matches:
+            resolved_vendors = matches
+            logger.info(f"Resolved vendor '{entity['term']}' → {matches}")
+        else:
+            logger.info(f"No vendor match for '{entity['term']}' — analyst will scan all results")
+    elif entity.get("type") == "customer" and entity.get("term"):
+        customer_list = _fetch_all_customers()
+        matches = _resolve_customer_name(entity["term"], customer_list)
+        if matches:
+            resolved_customers = matches
+            logger.info(f"Resolved customer '{entity['term']}' → {matches}")
+        else:
+            logger.info(f"No customer match for '{entity['term']}' — analyst will scan all results")
+
+    # Step 1 — Plan (entity context injected inside _plan_calls)
     plan = _plan_calls(user_question, intent)
     if "error" in plan and not plan.get("calls"):
         return {
@@ -686,6 +673,8 @@ def interpret_and_fetch(user_question: str) -> dict:
             "intent": intent,
             "query_complexity": "simple",
             "results": [],
+            "resolved_vendors": resolved_vendors or None,
+            "resolved_customers": resolved_customers or None,
             "error": "Couldn't figure out how to query QuickBooks for that. Try rephrasing.",
         }
 
@@ -698,5 +687,7 @@ def interpret_and_fetch(user_question: str) -> dict:
         "query_complexity": plan.get("query_complexity", "simple"),
         "reasoning": plan.get("reasoning", ""),
         "results": results,
+        "resolved_vendors": resolved_vendors or None,
+        "resolved_customers": resolved_customers or None,
         "error": None,
     }

@@ -76,12 +76,14 @@ def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
 
         logger.info(f"Processing query: '{clean_text}'")
 
+        logger.info("Step 1: Classifying intent...")
         intent_data = classify_intent(clean_text)
         intent_data["original_question"] = clean_text
-
         logger.info(f"Route: {intent_data.get('route')} | Intent: {intent_data.get('intent')}")
 
+        logger.info("Step 2: Building report...")
         blocks = build_report(intent_data)
+        logger.info("Step 3: Report built, posting to Slack...")
 
         # Update the thinking message with the real answer
         if thinking_ts:

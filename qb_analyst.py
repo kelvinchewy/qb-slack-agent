@@ -67,6 +67,29 @@ For RETRIEVAL with vendor/customer name search:
 - Always tell the user what QB vendor/customer name was matched against their search term
 - Never return zero results if there are plausible partial matches in the data
 
+For TOP VENDORS BY SPEND:
+- From the Bill results, group bills by VendorRef.name and sum TotalAmt per vendor
+- Sort descending by total spend
+- Detail table: Rank, Vendor, Total Amount, # Bills, % of Total Spend
+- Lead with: "Top N vendors account for X% of total spend of MYR Y"
+
+For LARGE TRANSACTIONS (amount threshold):
+- List all bills returned (already filtered by TotalAmt in the SQL)
+- Detail table: Date, Vendor, Amount, Status, Due Date
+- Sort by amount descending
+- Note the threshold used in the direct_answer
+
+For NEW VENDOR DETECTION (two-period Bill queries):
+- Compare vendor sets across the two periods
+- New vendors = appear in period 2 (recent) but NOT in period 1 (prior)
+- Detail table: Vendor, First Bill Date, Total Amount, # Bills
+- Also note vendors that stopped appearing (churned vendors)
+
+For BILLPAYMENT queries:
+- BillPayment records when money actually left the account (vs Bill = when obligation was recorded)
+- Detail table: Date, Vendor, Amount, Payment Method
+- Note any Bills that are recorded but NOT yet paid (outstanding)
+
 For FORECAST_TREND:
 - State the trend first: "Utilities averaged MYR 194K/month over 3 months"
 - Then the forecast: "March forecast: MYR 190K-200K based on run rate"
@@ -122,7 +145,16 @@ def analyse(interpreter_result: dict) -> dict:
     # Build context for Claude — summarise what was fetched
     data_context = _build_data_context(results)
 
-    logger.info(f"Analysing QB data for: '{question}'")
+    # Inject resolved entity names so analyst knows what to filter for
+    resolved_vendors = interpreter_result.get("resolved_vendors") or []
+    resolved_customers = interpreter_result.get("resolved_customers") or []
+    entity_context = ""
+    if resolved_vendors:
+        entity_context += f"\nResolved vendor name(s) to filter for: {', '.join(resolved_vendors)}"
+    if resolved_customers:
+        entity_context += f"\nResolved customer name(s) to filter for: {', '.join(resolved_customers)}"
+
+    logger.info(f"Analysing QB data for: '{question}'{' | vendors: ' + str(resolved_vendors) if resolved_vendors else ''}")
 
     try:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
@@ -132,7 +164,7 @@ def analyse(interpreter_result: dict) -> dict:
             system=ANALYST_SYSTEM,
             messages=[{
                 "role": "user",
-                "content": f"User question: {question}\n\nQuery intent: {intent}\n\nQuickBooks data:\n{data_context}"
+                "content": f"User question: {question}\n\nQuery intent: {intent}{entity_context}\n\nQuickBooks data:\n{data_context}"
             }],
         )
 
