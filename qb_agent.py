@@ -107,56 +107,69 @@ class TokenManager:
 
 # ─── Railway Token Persistence ───────────────────────────────────────
 
+def _upsert_railway_variable(railway_token: str, project_id: str, environment_id: str, service_id: str, name: str, value: str) -> bool:
+    """Upsert a single Railway environment variable via GraphQL API."""
+    mutation = """
+    mutation variableUpsert($input: VariableUpsertInput!) {
+        variableUpsert(input: $input)
+    }
+    """
+    payload = {
+        "query": mutation,
+        "variables": {
+            "input": {
+                "projectId": project_id,
+                "environmentId": environment_id,
+                "serviceId": service_id,
+                "name": name,
+                "value": value,
+            }
+        }
+    }
+    resp = requests.post(
+        "https://backboard.railway.app/graphql/v2",
+        headers={
+            "Authorization": f"Bearer {railway_token}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=10,
+    )
+    data = resp.json()
+    if resp.status_code == 200 and "errors" not in data:
+        return True
+    logger.warning(f"Railway upsert failed for {name}: {resp.status_code} — {str(data)[:200]}")
+    return False
+
+
 def _persist_tokens_to_railway(access_token: str, refresh_token: str):
     """
     Write new QB tokens back to Railway environment variables.
-    This ensures tokens survive container restarts.
-    Requires RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID env vars.
-    Fails silently if Railway API is not configured — tokens still work in memory.
+    This ensures tokens survive container restarts and redeployments.
+    Uses RAILWAY_API_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_ENVIRONMENT_ID, RAILWAY_PROJECT_ID
+    — all injected automatically by Railway except RAILWAY_API_TOKEN.
     """
     railway_token = os.environ.get("RAILWAY_API_TOKEN", "")
     service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
     environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+    project_id = os.environ.get("RAILWAY_PROJECT_ID", "")
 
-    if not railway_token or not service_id:
-        logger.warning("Railway API not configured — tokens updated in memory only. "
-                       "Set RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID to persist across restarts.")
+    if not railway_token:
+        logger.warning("RAILWAY_API_TOKEN not set — tokens updated in memory only.")
+        return
+
+    if not all([service_id, environment_id, project_id]):
+        logger.warning(f"Railway IDs missing — service:{bool(service_id)} env:{bool(environment_id)} project:{bool(project_id)}")
         return
 
     try:
-        # Railway GraphQL API to update env vars
-        mutation = """
-        mutation UpdateServiceVariables($serviceId: String!, $environmentId: String!, $variables: ServiceVariables!) {
-            serviceVariablesUpsert(
-                serviceId: $serviceId,
-                environmentId: $environmentId,
-                variables: $variables
-            )
-        }
-        """
-        variables = {
-            "serviceId": service_id,
-            "environmentId": environment_id,
-            "variables": {
-                "QB_ACCESS_TOKEN": access_token,
-                "QB_REFRESH_TOKEN": refresh_token,
-            }
-        }
+        ok1 = _upsert_railway_variable(railway_token, project_id, environment_id, service_id, "QB_ACCESS_TOKEN", access_token)
+        ok2 = _upsert_railway_variable(railway_token, project_id, environment_id, service_id, "QB_REFRESH_TOKEN", refresh_token)
 
-        resp = requests.post(
-            "https://backboard.railway.app/graphql/v2",
-            headers={
-                "Authorization": f"Bearer {railway_token}",
-                "Content-Type": "application/json",
-            },
-            json={"query": mutation, "variables": variables},
-            timeout=10,
-        )
-
-        if resp.status_code == 200 and "errors" not in resp.json():
+        if ok1 and ok2:
             logger.info("✅ Tokens persisted to Railway env vars successfully.")
         else:
-            logger.warning(f"Railway token persist failed: {resp.status_code} — {resp.text[:200]}")
+            logger.warning("⚠️ Railway token persist partially failed — check logs above.")
 
     except Exception as e:
         logger.warning(f"Railway token persist error (non-fatal): {e}")
