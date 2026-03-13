@@ -169,6 +169,97 @@ def health():
     return jsonify({"status": "ok", "service": "qb-slack-agent"})
 
 
+@flask_app.route("/auth", methods=["GET"])
+def auth():
+    """
+    Start QuickBooks OAuth flow.
+    Visit https://qb-slack-agent-production.up.railway.app/auth in browser to re-authorize.
+    """
+    import secrets
+    from urllib.parse import urlencode
+
+    state = secrets.token_urlsafe(16)
+    params = {
+        "client_id": Config.QB_CLIENT_ID,
+        "scope": "com.intuit.quickbooks.accounting",
+        "redirect_uri": Config.QB_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    }
+    auth_url = "https://appcenter.intuit.com/connect/oauth2?" + urlencode(params)
+    logger.info(f"Starting QB OAuth flow, redirecting to Intuit...")
+    from flask import redirect
+    return redirect(auth_url)
+
+
+@flask_app.route("/callback", methods=["GET"])
+def callback():
+    """
+    QuickBooks OAuth callback — exchanges code for tokens and saves to Railway.
+    """
+    import requests as req
+    from requests.auth import HTTPBasicAuth
+
+    code = request.args.get("code")
+    error = request.args.get("error")
+
+    if error:
+        logger.error(f"QB OAuth error: {error}")
+        return f"<h2>❌ Authorization failed: {error}</h2>", 400
+
+    if not code:
+        return "<h2>❌ No authorization code received.</h2>", 400
+
+    try:
+        # Exchange code for tokens
+        response = req.post(
+            "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+            auth=HTTPBasicAuth(Config.QB_CLIENT_ID, Config.QB_CLIENT_SECRET),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": Config.QB_REDIRECT_URI,
+            },
+        )
+
+        if response.status_code != 200:
+            logger.error(f"Token exchange failed: {response.status_code} — {response.text}")
+            return f"<h2>❌ Token exchange failed: {response.text}</h2>", 400
+
+        tokens = response.json()
+        access_token = tokens["access_token"]
+        refresh_token = tokens["refresh_token"]
+
+        logger.info("✅ QB OAuth tokens obtained successfully.")
+
+        # Persist to Railway
+        from qb_agent import _persist_tokens_to_railway
+        _persist_tokens_to_railway(access_token, refresh_token)
+
+        # Update in-memory token manager immediately
+        from qb_agent import _token_manager
+        _token_manager.access_token = access_token
+        _token_manager.refresh_token = refresh_token
+        import time
+        _token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
+
+        logger.info("✅ In-memory tokens updated.")
+
+        return """
+        <h2>✅ QuickBooks Authorization Successful!</h2>
+        <p>Tokens have been saved to Railway. The finance agent is now connected to QuickBooks.</p>
+        <p>You can close this window.</p>
+        """, 200
+
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        return f"<h2>❌ Error: {e}</h2>", 500
+
+
 @flask_app.route("/query", methods=["POST"])
 def query():
     """
