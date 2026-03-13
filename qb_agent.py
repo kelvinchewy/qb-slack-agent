@@ -71,7 +71,7 @@ class TokenManager:
         return time.time() >= (self.expires_at - REFRESH_BUFFER_SECONDS)
 
     def _refresh(self):
-        """Exchange refresh token for a new access token."""
+        """Exchange refresh token for a new access token and persist to Railway."""
         try:
             response = requests.post(
                 TOKEN_URL,
@@ -97,13 +97,69 @@ class TokenManager:
 
             logger.info("✅ QB access token refreshed successfully.")
 
-            # Log reminder if refresh token was also rotated
-            if "refresh_token" in tokens:
-                logger.info("ℹ️  Refresh token rotated — update QB_REFRESH_TOKEN in Railway if persistent.")
+            # Persist new tokens to Railway so they survive container restarts
+            _persist_tokens_to_railway(self.access_token, self.refresh_token)
 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
             raise
+
+
+# ─── Railway Token Persistence ───────────────────────────────────────
+
+def _persist_tokens_to_railway(access_token: str, refresh_token: str):
+    """
+    Write new QB tokens back to Railway environment variables.
+    This ensures tokens survive container restarts.
+    Requires RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID env vars.
+    Fails silently if Railway API is not configured — tokens still work in memory.
+    """
+    railway_token = os.environ.get("RAILWAY_API_TOKEN", "")
+    service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
+    environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+
+    if not railway_token or not service_id:
+        logger.warning("Railway API not configured — tokens updated in memory only. "
+                       "Set RAILWAY_API_TOKEN and RAILWAY_SERVICE_ID to persist across restarts.")
+        return
+
+    try:
+        # Railway GraphQL API to update env vars
+        mutation = """
+        mutation UpdateServiceVariables($serviceId: String!, $environmentId: String!, $variables: ServiceVariables!) {
+            serviceVariablesUpsert(
+                serviceId: $serviceId,
+                environmentId: $environmentId,
+                variables: $variables
+            )
+        }
+        """
+        variables = {
+            "serviceId": service_id,
+            "environmentId": environment_id,
+            "variables": {
+                "QB_ACCESS_TOKEN": access_token,
+                "QB_REFRESH_TOKEN": refresh_token,
+            }
+        }
+
+        resp = requests.post(
+            "https://backboard.railway.app/graphql/v2",
+            headers={
+                "Authorization": f"Bearer {railway_token}",
+                "Content-Type": "application/json",
+            },
+            json={"query": mutation, "variables": variables},
+            timeout=10,
+        )
+
+        if resp.status_code == 200 and "errors" not in resp.json():
+            logger.info("✅ Tokens persisted to Railway env vars successfully.")
+        else:
+            logger.warning(f"Railway token persist failed: {resp.status_code} — {resp.text[:200]}")
+
+    except Exception as e:
+        logger.warning(f"Railway token persist error (non-fatal): {e}")
 
 
 # Singleton token manager — shared across all requests
