@@ -198,6 +198,12 @@ Examples:
 - "who do we pay for electricity" → P&L + Bill query for date range
 - "top expense vendors last month" → P&L for last month + Bill query last month
 
+ENTITY NAME MATCHING RULE:
+When the user mentions a vendor or customer name, match it against the REAL QB NAMES list
+provided at the bottom of their message. Match loosely — abbreviations, partial names,
+missing words, different punctuation, shorthand all count as a match.
+Always use the EXACT QB name in the SQL — never the user's version.
+
 DEFAULT DATE RULE:
 If no date or period is specified, default to the current calendar month:
   start_date = first day of current month
@@ -257,6 +263,76 @@ Output format:
 
 Respond ONLY with valid JSON. No markdown, no backticks.
 """
+
+
+# ─── Step 0.5: Entity Detection + Name Resolution ────────────────────
+
+ENTITY_DETECT_SYSTEM = """You are a query parser for a QuickBooks finance agent.
+
+Determine if the user's question is asking about a SPECIFIC vendor or customer by name.
+
+Examples:
+- "show me S AND E trading invoices" → { "type": "customer", "term": "S AND E trading" }
+- "bills from quickbooks" → { "type": "vendor", "term": "quickbooks" }
+- "show me lawyer bills" → { "type": "vendor", "term": "lawyer" }
+- "S&E invoices last month" → { "type": "customer", "term": "S&E" }
+- "Vintech bills" → { "type": "vendor", "term": "Vintech" }
+- "show me all expenses last month" → { "type": null, "term": null }
+- "what are our total expenses" → { "type": null, "term": null }
+- "balance sheet" → { "type": null, "term": null }
+
+Rules:
+- "vendor" = someone we pay (bills, expenses)
+- "customer" = someone who pays us (invoices, AR)
+- If ambiguous, use "customer" for invoice queries, "vendor" for bill/expense queries
+- Only extract a name if the user clearly mentions a specific entity
+
+Respond ONLY with valid JSON. No markdown, no backticks."""
+
+
+def _detect_entity(question: str) -> dict:
+    """
+    Use Haiku to detect if question mentions a specific vendor/customer name.
+    Returns { "type": "vendor"|"customer"|None, "term": "search term"|None }
+    """
+    try:
+        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            system=ENTITY_DETECT_SYSTEM,
+            messages=[{"role": "user", "content": question}],
+        )
+        raw = response.content[0].text.strip()
+        result = json.loads(raw)
+        logger.info(f"Entity detected: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Entity detection error: {e}")
+        return {"type": None, "term": None}
+
+
+def _enrich_question_with_resolved_name(question: str, original_term: str, resolved_names: list[str]) -> str:
+    """
+    Rewrite the question replacing the user's fuzzy term with the exact QB name(s).
+    This ensures the planner generates correct SQL.
+    """
+    if not resolved_names:
+        return question
+    if len(resolved_names) == 1:
+        # Replace the user's term with the exact QB name
+        enriched = question.replace(original_term, resolved_names[0])
+        if enriched == question:
+            # Term wasn't found verbatim — append clarification
+            enriched = f"{question} [resolved entity name: {resolved_names[0]}]"
+        logger.info(f"Question enriched: '{question}' → '{enriched}'")
+        return enriched
+    else:
+        # Multiple matches — tell planner to fetch all and let analyst filter
+        names_str = ", ".join(resolved_names)
+        enriched = f"{question} [possible QB matches: {names_str}]"
+        logger.info(f"Question enriched with multiple matches: '{enriched}'")
+        return enriched
 
 
 # ─── Step 1.5: Vendor/Customer Name Resolution ───────────────────────
@@ -448,16 +524,96 @@ def _extract_date_range_from_plan(plan: dict) -> dict:
     return {}
 
 
+def _generate_name_examples(names: list[str]) -> list[str]:
+    """
+    Dynamically generate fuzzy match examples from real QB names.
+    Shows the planner what kinds of shorthand map to each exact name.
+    """
+    import re
+    examples = []
+    for name in names:
+        variants = []
+
+        # Abbreviation: first letters of significant words
+        words = re.split(r"[\s\-\(\)\.]+", name)
+        SKIP = {"SDN", "BHD", "PLT", "LTD", "PTE", "HK", "USD", "SMM2H", "AND", "THE", "FOR", "OF"}
+        sig_words = [w for w in words if len(w) > 2 and w.upper() not in SKIP]
+        if len(sig_words) >= 2:
+            abbrev = " ".join(sig_words[:2])
+            if abbrev.lower() != name.lower():
+                variants.append(f'"{abbrev}"')
+
+        # First word only (if distinctive)
+        if sig_words and len(sig_words[0]) > 3:
+            first = sig_words[0]
+            if first.lower() != name.lower():
+                variants.append(f'"{first}"')
+
+        # Strip suffix noise: "- USD", "(HK)", "Pte. Ltd.", "Sdn Bhd", "PLT"
+        stripped = re.sub(r"\s*[-–]\s*(USD|MYR|SGD)$", "", name, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*(Sdn\.?\s*Bhd\.?|Pte\.?\s*Ltd\.?|PLT|Limited)$", "", stripped, flags=re.IGNORECASE).strip()
+        if stripped and stripped.lower() != name.lower() and len(stripped) > 3:
+            variants.append(f'"{stripped}"')
+
+        if variants:
+            examples.append(f'  {" or ".join(variants)} → "{name}"')
+
+    return examples
+
+
+def _build_entity_context() -> str:
+    """
+    Fetch real vendor and customer names from QB and format as context for the planner.
+    Includes dynamically generated fuzzy match examples so the planner understands
+    what shorthand maps to which exact name — no hardcoding.
+    """
+    try:
+        vendors = _fetch_all_vendors()
+        customers = _fetch_all_customers()
+        lines = []
+
+        if vendors:
+            lines.append("REAL QB VENDOR NAMES (use exact name in SQL):")
+            for v in vendors:
+                lines.append(f"  - {v}")
+            vendor_examples = _generate_name_examples(vendors)
+            if vendor_examples:
+                lines.append("\nVendor fuzzy match examples (user shorthand → exact QB name):")
+                lines.extend(vendor_examples)
+
+        if customers:
+            lines.append("\nREAL QB CUSTOMER NAMES (use exact name in SQL):")
+            for c in customers:
+                lines.append(f"  - {c}")
+            customer_examples = _generate_name_examples(customers)
+            if customer_examples:
+                lines.append("\nCustomer fuzzy match examples (user shorthand → exact QB name):")
+                lines.extend(customer_examples)
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Could not fetch entity lists: {e}")
+        return ""
+
+
 def _plan_calls(question: str, intent: str) -> dict:
     """Generate QB API call plan based on classified intent."""
     system = FORECAST_SYSTEM if intent == "FORECAST_TREND" else RETRIEVAL_SYSTEM
+
+    # Inject real entity names so planner can match user input to exact QB names
+    entity_context = _build_entity_context()
+    if entity_context:
+        enriched_question = f"{question}\n\n---\n{entity_context}"
+    else:
+        enriched_question = question
+
     try:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
             system=system,
-            messages=[{"role": "user", "content": question}],
+            messages=[{"role": "user", "content": enriched_question}],
         )
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
@@ -504,10 +660,10 @@ def interpret_and_fetch(user_question: str) -> dict:
     """
     logger.info(f"Interpreting: '{user_question}'")
 
-    # Step 0 — Classify
+    # Step 0 — Classify intent
     intent = _classify_intent(user_question)
 
-    # Step 1 — Plan
+    # Step 1 — Plan (entity context injected automatically inside _plan_calls)
     plan = _plan_calls(user_question, intent)
     if "error" in plan and not plan.get("calls"):
         return {
@@ -518,54 +674,6 @@ def interpret_and_fetch(user_question: str) -> dict:
             "error": "Couldn't figure out how to query QuickBooks for that. Try rephrasing.",
         }
 
-    # Step 1.5 — Vendor/customer name resolution (if needed)
-    resolved_vendors = None
-    resolved_customers = None
-
-    if _needs_vendor_resolution(plan):
-        # Extract what the user said about the vendor
-        vendor_term = ""
-        for call in plan.get("calls", []):
-            if call.get("type") == "query" and "vendorref.name" in call.get("sql", "").lower():
-                vendor_term = _extract_vendor_term(call["sql"])
-                break
-        if not vendor_term:
-            vendor_term = user_question  # Fall back to full question
-
-        logger.info(f"Resolving vendor name: '{vendor_term}'")
-        vendor_list = _fetch_all_vendors()
-        if vendor_list:
-            matched = _resolve_vendor_name(vendor_term, vendor_list)
-            if matched:
-                resolved_vendors = matched
-                date_range = _extract_date_range_from_plan(plan)
-                plan = _rewrite_plan_with_vendor(plan, matched, date_range)
-                logger.info(f"Plan rewritten with resolved vendors: {matched}")
-            else:
-                # No match found — fetch all bills for period, analyst will note no match
-                logger.info(f"No vendor match found for '{vendor_term}' — fetching all bills")
-                date_range = _extract_date_range_from_plan(plan)
-                if date_range.get("start"):
-                    fallback_sql = f"SELECT * FROM Bill WHERE TxnDate >= '{date_range['start']}' AND TxnDate <= '{date_range['end']}' ORDERBY TxnDate DESC MAXRESULTS 100"
-                else:
-                    fallback_sql = "SELECT * FROM Bill ORDERBY TxnDate DESC MAXRESULTS 100"
-                plan["calls"] = [c if "vendorref.name" not in c.get("sql","").lower()
-                                 else {**c, "sql": fallback_sql, "resolved_vendors": [], "vendor_search_term": vendor_term}
-                                 for c in plan["calls"]]
-
-    if _needs_customer_resolution(plan):
-        # For Invoice queries — fetch all customers and resolve if question mentions a name
-        customer_list = _fetch_all_customers()
-        if customer_list:
-            matched = _resolve_customer_name(user_question, customer_list)
-            if matched:
-                resolved_customers = matched
-                # Inject resolved names into plan metadata for analyst
-                for call in plan.get("calls", []):
-                    if call.get("type") == "query" and "from invoice" in call.get("sql", "").lower():
-                        call["resolved_customers"] = matched
-                logger.info(f"Customer resolved: {matched}")
-
     # Step 2 — Execute
     results = _execute_calls(plan)
 
@@ -574,8 +682,6 @@ def interpret_and_fetch(user_question: str) -> dict:
         "intent": intent,
         "query_complexity": plan.get("query_complexity", "simple"),
         "reasoning": plan.get("reasoning", ""),
-        "resolved_vendors": resolved_vendors,
-        "resolved_customers": resolved_customers,
         "results": results,
         "error": None,
     }
