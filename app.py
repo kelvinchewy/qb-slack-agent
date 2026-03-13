@@ -51,8 +51,10 @@ def strip_mention(text: str) -> str:
 def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
     """
     Runs in a background thread — does the heavy lifting after Slack ack.
-    Posts the result directly to the channel/thread.
+    Posts a thinking message immediately, then updates it with the real answer.
     """
+    thinking_ts = None
+
     try:
         clean_text = strip_mention(user_message)
 
@@ -64,6 +66,14 @@ def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
             )
             return
 
+        # Post thinking message immediately so user knows it's working
+        thinking_resp = client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="⏳ Looking into that, give me a moment...",
+        )
+        thinking_ts = thinking_resp.get("ts")
+
         logger.info(f"Processing query: '{clean_text}'")
 
         intent_data = classify_intent(clean_text)
@@ -73,21 +83,38 @@ def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
 
         blocks = build_report(intent_data)
 
-        client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
-            blocks=blocks,
-            text=f"Finance report: {intent_data.get('intent', 'query')}",
-        )
+        # Update the thinking message with the real answer
+        if thinking_ts:
+            client.chat_update(
+                channel=channel,
+                ts=thinking_ts,
+                blocks=blocks,
+                text=f"Finance report: {intent_data.get('intent', 'query')}",
+            )
+        else:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                blocks=blocks,
+                text=f"Finance report: {intent_data.get('intent', 'query')}",
+            )
 
     except Exception as e:
         logger.error(f"Query processing error: {e}")
         try:
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text="Something went wrong. Please try again.",
-            )
+            error_text = "Something went wrong. Please try again."
+            if thinking_ts:
+                client.chat_update(
+                    channel=channel,
+                    ts=thinking_ts,
+                    text=error_text,
+                )
+            else:
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=error_text,
+                )
         except Exception:
             pass
 
