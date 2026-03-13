@@ -236,18 +236,16 @@ def callback():
 
         logger.info("✅ QB OAuth tokens obtained successfully.")
 
-        # Persist to Railway
-        from qb_agent import _persist_tokens_to_railway
-        _persist_tokens_to_railway(access_token, refresh_token)
-
         # Update in-memory token manager immediately
-        from qb_agent import _token_manager
-        _token_manager.access_token = access_token
-        _token_manager.refresh_token = refresh_token
         import time
-        _token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
-
+        import qb_agent
+        qb_agent._token_manager.access_token = access_token
+        qb_agent._token_manager.refresh_token = refresh_token
+        qb_agent._token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
         logger.info("✅ In-memory tokens updated.")
+
+        # Persist to Railway so tokens survive future restarts
+        qb_agent._persist_tokens_to_railway(access_token, refresh_token)
 
         return """
         <h2>✅ QuickBooks Authorization Successful!</h2>
@@ -258,6 +256,43 @@ def callback():
     except Exception as e:
         logger.error(f"Callback error: {e}")
         return f"<h2>❌ Error: {e}</h2>", 500
+
+
+@flask_app.route("/auth-status", methods=["GET"])
+def auth_status():
+    """
+    Debug endpoint — shows QB token state and Railway persistence config.
+    Visit https://qb-slack-agent-production.up.railway.app/auth-status to check.
+    """
+    import time
+    import qb_agent
+    tm = qb_agent._token_manager
+    now = time.time()
+    expires_in = int(tm.expires_at - now) if tm.expires_at > now else -1
+
+    railway_ok = all([
+        os.environ.get("RAILWAY_API_TOKEN"),
+        os.environ.get("RAILWAY_SERVICE_ID"),
+        os.environ.get("RAILWAY_ENVIRONMENT_ID"),
+        os.environ.get("RAILWAY_PROJECT_ID"),
+    ])
+
+    return jsonify({
+        "token_state": {
+            "has_access_token": bool(tm.access_token),
+            "has_refresh_token": bool(tm.refresh_token),
+            "expires_in_seconds": expires_in,
+            "needs_refresh": tm._needs_refresh(),
+        },
+        "railway_persistence": {
+            "configured": railway_ok,
+            "has_api_token": bool(os.environ.get("RAILWAY_API_TOKEN")),
+            "has_service_id": bool(os.environ.get("RAILWAY_SERVICE_ID")),
+            "has_environment_id": bool(os.environ.get("RAILWAY_ENVIRONMENT_ID")),
+            "has_project_id": bool(os.environ.get("RAILWAY_PROJECT_ID")),
+        },
+        "action": "Visit /auth to re-authorize QuickBooks" if expires_in < 0 else "OK"
+    })
 
 
 @flask_app.route("/query", methods=["POST"])

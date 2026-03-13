@@ -88,7 +88,7 @@ class TokenManager:
 
             if response.status_code != 200:
                 logger.error(f"Token refresh failed: {response.status_code} — {response.text}")
-                raise Exception("QB token refresh failed. Re-run qb_auth.py to re-authorize.")
+                raise Exception("QB token refresh failed. Visit /auth on the Railway URL to re-authorize.")
 
             tokens = response.json()
             self.access_token = tokens["access_token"]
@@ -136,9 +136,9 @@ def _upsert_railway_variable(railway_token: str, project_id: str, environment_id
         timeout=10,
     )
     data = resp.json()
-    if resp.status_code == 200 and "errors" not in data:
+    if resp.status_code == 200 and not data.get("errors"):
         return True
-    logger.warning(f"Railway upsert failed for {name}: {resp.status_code} — {str(data)[:200]}")
+    logger.warning(f"Railway upsert failed for {name}: {resp.status_code} — {str(data)[:300]}")
     return False
 
 
