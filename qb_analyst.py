@@ -161,6 +161,25 @@ For SUMMARY GRID (/summary):
 - Populate business_lines dict: hosting / mining / others / total
 - Each with revenue, costs, net
 
+For MONTH-BY-MONTH Bills (multiple Bill query results — one per month):
+- Each result covers one calendar month — label each row with the month name
+- Columns: Month | Total Billed (MYR) | # Bills | Notes
+- One row per month, sorted chronologically oldest first
+- Add TOTAL row at bottom
+- Notes column: flag unusually high or zero months
+- If filtered to a specific vendor, scope to that vendor's bills only
+
+For MONTH-BY-MONTH Invoices (multiple Invoice query results — one per month):
+- Each result covers one calendar month — label each row with the month name
+- Columns: Month | Total Invoiced (MYR) | # Invoices | Notes
+- One row per month, sorted chronologically oldest first
+- Add TOTAL row at bottom
+
+For MONTH-BY-MONTH BillPayments (multiple BillPayment query results — one per month):
+- Columns: Month | Total Paid (MYR) | # Payments | Notes
+- One row per month, sorted chronologically oldest first
+- Add TOTAL row at bottom
+
 For CHAINED CALLS (P&L + Bill together):
 - Use P&L for category totals
 - Scan Bill line items for matching account names

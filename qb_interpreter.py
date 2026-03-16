@@ -169,6 +169,35 @@ DECISION RULES:
 15. BillPayment / "payments made to" / "when did we pay" / "payment history" →
     SELECT * FROM BillPayment WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
     BillPayment records actual payment transactions (cheques, bank transfers) against bills.
+16. ANY query with monthly breakdown / "breakdown by month" / "month by month" / "monthly" across a multi-month range →
+    Generate ONE call per calendar month in the range, using the same call type as you would for a single period.
+    Do NOT make a single call for the full range — the analyst needs one result per month to build per-month rows.
+    Always use the last calendar day of each month as end_date:
+      January=31, February=28 (29 in leap years: 2024, 2028 etc), March=31, April=30,
+      May=31, June=30, July=31, August=31, September=30, October=31, November=30, December=31
+
+    By query type:
+    - P&L / expenses / business line → one ProfitAndLoss report per month
+    - Bills / vendor spend           → one Bill query per month (date range only, no vendor filter in SQL)
+    - Invoices / AR / customer       → one Invoice query per month (date range only, no customer filter in SQL)
+    - BillPayments / payments made   → one BillPayment query per month
+
+    Example — "P&L Oct 2025 to Feb 2026 breakdown by month" → 5 ProfitAndLoss calls:
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-10-01", "end_date": "2025-10-31"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-11-01", "end_date": "2025-11-30"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-12-01", "end_date": "2025-12-31"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}}
+
+    Example — "bills from S And E month by month Q1 2026" → 3 Bill queries:
+      {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-01-01' AND TxnDate <= '2026-01-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
+      {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-02-01' AND TxnDate <= '2026-02-28' ORDERBY TxnDate DESC MAXRESULTS 100"}}
+      {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-03-01' AND TxnDate <= '2026-03-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
+
+    Example — "Northstar invoices breakdown by month Oct–Dec 2025" → 3 Invoice queries:
+      {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-10-01' AND TxnDate <= '2025-10-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
+      {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-11-01' AND TxnDate <= '2025-11-30' ORDERBY TxnDate DESC MAXRESULTS 100"}}
+      {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-12-01' AND TxnDate <= '2025-12-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
 
 CHAINING RULE:
 When question asks who/which vendor/payee is behind an expense category, always chain:
@@ -192,6 +221,11 @@ Examples:
 - "all transactions over MYR 50000 this month" → Bill query with TotalAmt > 50000
 - "new vendors this quarter" → Bill query this quarter + Bill query last quarter (two calls)
 - "when did we last pay Northstar" → BillPayment query for last 6 months
+- "mining P&L Oct to Feb breakdown by month" → 5 separate ProfitAndLoss calls, one per month
+- "show monthly P&L last quarter" → 3 separate ProfitAndLoss calls, one per month in the quarter
+- "S And E bills month by month last quarter" → 3 separate Bill queries, one per month
+- "Northstar invoices breakdown by month Q4 2025" → 3 separate Invoice queries, one per month
+- "payments to vendors month by month Jan–Mar" → 3 separate BillPayment queries, one per month
 
 ENTITY NAME MATCHING RULE:
 When the user mentions a vendor or customer name, match it against the REAL QB NAMES list
