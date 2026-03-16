@@ -624,18 +624,28 @@ def query():
 def _startup_tasks():
     """
     Run on startup in a background thread:
-    1. Check QB token health — logs warning if broken, tells admin what to do
+    1. Check QB token health with retry — Railway network may not be ready immediately
     2. Warm entity cache (vendor + customer lists)
     3. Schedule 24h cache refresh
     """
     import qb_agent as _qb_agent
 
-    # Step 1 — Token health check
+    # Step 1 — Token health check with retry
+    # Railway network can take time to stabilise after container start.
+    # Retry every 20s for up to ~3 minutes before giving up.
     logger.info("🔍 Checking QB token health...")
-    health = _qb_agent.check_token_health()
+    health = {"healthy": False}
+    MAX_HEALTH_ATTEMPTS = 9  # 9 × 20s = ~3 minutes max
+    for attempt in range(1, MAX_HEALTH_ATTEMPTS + 1):
+        health = _qb_agent.check_token_health()
+        if health["healthy"]:
+            break
+        if attempt < MAX_HEALTH_ATTEMPTS:
+            logger.warning(f"QB token check failed (attempt {attempt}/{MAX_HEALTH_ATTEMPTS}) — retrying in 20s...")
+            time.sleep(20)
+
     if not health["healthy"]:
-        logger.error("❌ QB token is broken at startup — queries will fail until re-authorized.")
-        logger.error("👉 Visit https://qb-slack-agent-production.up.railway.app/auth to fix.")
+        logger.error("❌ QB token broken after retries — visit /auth to re-authorize.")
     else:
         # Step 2 — Warm entity cache (only if token is healthy)
         warm_cache()
