@@ -2,17 +2,24 @@
 QB Slack Agent — Main entry point.
 Slack Bolt app using Socket Mode + Flask HTTP API for agent-to-agent calls.
 
+Entry points:
+  Slash commands: /bills /invoices /vendors /summary /balance /pnl /finance
+  @mention / DM:  natural language via #ask-finance or direct message
+  HTTP API:       POST /query (agent-to-agent, X-API-Key required)
+
 HTTP endpoints:
-  GET  /health  — uptime check, no auth required
-  POST /query   — agent-to-agent query, requires X-API-Key header
-    Request:  { "query": "what were expenses last month?" }
-    Response: { "status": "ok", "question": "...", "answer": "...", "data": {...} }
+  GET  /health     — uptime check
+  GET  /auth       — start QB OAuth flow in browser
+  GET  /callback   — QB OAuth callback
+  GET  /auth-status — token + Railway config debug
+  POST /query      — agent-to-agent query, requires X-API-Key header
 """
 
 import logging
 import os
 import re
 import threading
+import time
 
 from flask import Flask, request, jsonify
 from slack_bolt import App
@@ -21,7 +28,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from config import Config
 from orchestrator import classify_intent
 from report_builder import build_report
-from qb_interpreter import interpret_and_fetch
+from qb_interpreter import interpret_and_fetch, warm_cache, refresh_entity_cache
 from qb_analyst import analyse
 
 logging.basicConfig(
@@ -44,20 +51,31 @@ QB_API_KEY = os.environ.get("QB_API_KEY", "")
 slack_app = App(token=Config.SLACK_BOT_TOKEN, signing_secret=Config.SLACK_SIGNING_SECRET)
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────
+
 def strip_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
+def _run_pipeline(question: str) -> tuple[list, str]:
     """
-    Runs in a background thread — does the heavy lifting after Slack ack.
-    Posts a thinking message immediately, then updates it with the real answer.
+    Core pipeline: question → interpreter → analyst → formatter.
+    Returns (blocks, plain_text_fallback).
+    """
+    intent_data = classify_intent(question)
+    intent_data["original_question"] = question
+    blocks = build_report(intent_data)
+    return blocks, intent_data.get("intent", "query")
+
+
+def process_and_reply(client, channel: str, thread_ts: str | None, user_message: str):
+    """
+    Runs in background thread. Posts thinking message immediately, then updates in-place.
+    Used for @mentions and DMs.
     """
     thinking_ts = None
-
     try:
         clean_text = strip_mention(user_message)
-
         if not clean_text:
             client.chat_postMessage(
                 channel=channel,
@@ -66,60 +84,322 @@ def process_and_reply(client, channel: str, thread_ts: str, user_message: str):
             )
             return
 
-        # Post thinking message immediately so user knows it's working
         thinking_resp = client.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts,
             text="⏳ Looking into that, give me a moment...",
         )
         thinking_ts = thinking_resp.get("ts")
+        logger.info(f"Processing: '{clean_text}'")
 
-        logger.info(f"Processing query: '{clean_text}'")
+        blocks, intent = _run_pipeline(clean_text)
 
-        logger.info("Step 1: Classifying intent...")
-        intent_data = classify_intent(clean_text)
-        intent_data["original_question"] = clean_text
-        logger.info(f"Route: {intent_data.get('route')} | Intent: {intent_data.get('intent')}")
-
-        logger.info("Step 2: Building report...")
-        blocks = build_report(intent_data)
-        logger.info("Step 3: Report built, posting to Slack...")
-
-        # Update the thinking message with the real answer
         if thinking_ts:
             client.chat_update(
                 channel=channel,
                 ts=thinking_ts,
                 blocks=blocks,
-                text=f"Finance report: {intent_data.get('intent', 'query')}",
+                text=f"Finance report: {intent}",
             )
         else:
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                blocks=blocks,
-                text=f"Finance report: {intent_data.get('intent', 'query')}",
-            )
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, blocks=blocks,
+                                    text=f"Finance report: {intent}")
 
     except Exception as e:
         logger.error(f"Query processing error: {e}")
         try:
             error_text = "Something went wrong. Please try again."
             if thinking_ts:
-                client.chat_update(
-                    channel=channel,
-                    ts=thinking_ts,
-                    text=error_text,
-                )
+                client.chat_update(channel=channel, ts=thinking_ts, text=error_text)
             else:
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=error_text,
-                )
+                client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=error_text)
         except Exception:
             pass
 
+
+def process_slash(ack, respond, natural_language_query: str):
+    """
+    Shared handler for all slash commands.
+    Acks immediately, runs pipeline, responds in-channel.
+    """
+    ack()
+    try:
+        respond("⏳ Looking into that, give me a moment...")
+        logger.info(f"Slash command query: '{natural_language_query}'")
+        blocks, intent = _run_pipeline(natural_language_query)
+        respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
+    except Exception as e:
+        logger.error(f"Slash command error: {e}")
+        respond("Something went wrong. Please try again.", replace_original=True)
+
+
+def _get_vendor_matches(term: str) -> list[str]:
+    """Return vendor names matching the search term from the cache."""
+    from qb_interpreter import _entity_cache, _resolve_vendor_name
+    vendors = _entity_cache.get("vendors", [])
+    if not vendors or not term:
+        return []
+    matches = _resolve_vendor_name(term, vendors)
+    return matches or []
+
+
+def _get_customer_matches(term: str) -> list[str]:
+    """Return customer names matching the search term from the cache."""
+    from qb_interpreter import _entity_cache, _resolve_customer_name
+    customers = _entity_cache.get("customers", [])
+    if not customers or not term:
+        return []
+    matches = _resolve_customer_name(term, customers)
+    return matches or []
+
+
+def _clarification_blocks(term: str, matches: list[str], pending_query_template: str) -> list:
+    """
+    Build Slack Block Kit clarification message with buttons.
+    pending_query_template has {name} placeholder replaced per button.
+    """
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f'🔍 Found {len(matches)} vendors matching *"{term}"* — which one did you mean?'
+            }
+        },
+        {"type": "actions", "elements": []}
+    ]
+    for name in matches[:3]:  # max 3 buttons
+        blocks[1]["elements"].append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": name},
+            "value": pending_query_template.replace("{name}", name),
+            "action_id": f"clarify_vendor_{name[:20].replace(' ', '_')}",
+        })
+    return blocks
+
+
+# ─── Slash Command Handlers ───────────────────────────────────────────────
+
+@slack_app.command("/bills")
+def handle_bills(ack, respond, command):
+    """
+    /bills [vendor or all] [period]
+    Default: all vendors, past 3 months
+    Examples:
+      /bills                            → all vendors, past 3 months
+      /bills S And E past 6 months      → specific vendor drill-down
+      /bills top 5 last quarter         → top 5 by spend
+      /bills others past 3 months       → Others bucket only
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+
+    if not text:
+        query = "show me all bills for all vendors past 3 months"
+        process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+        return
+
+    # Check if this is a specific vendor query and needs clarification
+    lower = text.lower()
+    is_aggregate = any(w in lower for w in ["all", "top", "others", "every"])
+
+    if not is_aggregate:
+        # Extract potential vendor name (words before time words)
+        time_words = ["past", "last", "this", "since", "from", "in", "for"]
+        words = text.split()
+        vendor_words = []
+        for w in words:
+            if w.lower() in time_words:
+                break
+            vendor_words.append(w)
+        vendor_term = " ".join(vendor_words).strip()
+
+        if vendor_term and vendor_term.lower() not in ["all", "top", "others"]:
+            matches = _get_vendor_matches(vendor_term)
+            if len(matches) == 0:
+                # No match — show vendor list
+                from qb_interpreter import _entity_cache
+                vendor_list = _entity_cache.get("vendors", [])
+                vendor_text = "\n".join(f"• {v}" for v in vendor_list[:20])
+                respond(f"❓ No vendors found matching *\"{vendor_term}\"*.\n\nYour vendors:\n{vendor_text}")
+                return
+            elif len(matches) > 1:
+                # Ambiguous — show clarification buttons
+                period = text[len(vendor_term):].strip() or "past 3 months"
+                template = f"show me all bills for {{name}} {period}"
+                respond(blocks=_clarification_blocks(vendor_term, matches, template),
+                        text=f"Multiple vendors match '{vendor_term}'")
+                return
+            # else: single confident match — fall through with resolved name
+            text = f"{matches[0]} {text[len(vendor_term):].strip()}"
+
+    query = f"show me all bills for {text}" if text else "show me all bills past 3 months"
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+
+
+@slack_app.command("/invoices")
+def handle_invoices(ack, respond, command):
+    """
+    /invoices [customer or all] [period]
+    Default: all customers, past 3 months
+    Examples:
+      /invoices                         → all customers, past 3 months
+      /invoices Northstar last quarter  → Northstar drill-down
+      /invoices all last quarter        → all customers listed
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+
+    if not text:
+        query = "show me all invoices for all customers past 3 months"
+        process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+        return
+
+    lower = text.lower()
+    is_aggregate = any(w in lower for w in ["all", "top", "every"])
+
+    if not is_aggregate:
+        time_words = ["past", "last", "this", "since", "from", "in", "for"]
+        words = text.split()
+        customer_words = []
+        for w in words:
+            if w.lower() in time_words:
+                break
+            customer_words.append(w)
+        customer_term = " ".join(customer_words).strip()
+
+        if customer_term:
+            matches = _get_customer_matches(customer_term)
+            if len(matches) == 0:
+                from qb_interpreter import _entity_cache
+                customer_list = _entity_cache.get("customers", [])
+                customer_text = "\n".join(f"• {v}" for v in customer_list[:20])
+                respond(f"❓ No customers found matching *\"{customer_term}\"*.\n\nYour customers:\n{customer_text}")
+                return
+            elif len(matches) > 1:
+                period = text[len(customer_term):].strip() or "past 3 months"
+                template = f"show me all invoices for {{name}} {period}"
+                respond(blocks=_clarification_blocks(customer_term, matches, template),
+                        text=f"Multiple customers match '{customer_term}'")
+                return
+            text = f"{matches[0]} {text[len(customer_term):].strip()}"
+
+    query = f"show me all invoices for {text}" if text else "show me all invoices past 3 months"
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+
+
+@slack_app.command("/vendors")
+def handle_vendors(ack, respond, command):
+    """
+    /vendors [period]
+    Always aggregate — all vendors ranked by total billed.
+    Default: past 3 months
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+    period = text or "past 3 months"
+    query = f"show me all vendors ranked by total billed amount {period}"
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+
+
+@slack_app.command("/summary")
+def handle_summary(ack, respond, command):
+    """
+    /summary [period]
+    Top-level P&L grid: Hosting / Mining / Others / Total.
+    Default: last completed month
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+    period = text or "last month"
+    query = f"give me a financial summary split by hosting mining and others for {period}"
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+
+
+@slack_app.command("/balance")
+def handle_balance(ack, respond, command):
+    """
+    /balance
+    Balance sheet as of today. No params.
+    """
+    ack()
+    process_slash(ack=lambda: None, respond=respond,
+                  natural_language_query="show me the balance sheet as of today")
+
+
+@slack_app.command("/pnl")
+def handle_pnl(ack, respond, command):
+    """
+    /pnl [hosting | mining | others | all] [period]
+    Full P&L by business line with accrual flagging.
+    Default: all lines, last completed month
+    Examples:
+      /pnl                          → all lines, last month
+      /pnl hosting last quarter     → hosting only
+      /pnl mining last quarter      → mining only
+      /pnl others past 3 months     → others expanded by account
+      /pnl all last quarter         → all three lines + combined
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+
+    if not text:
+        query = "show me the full P&L for all business lines last month with accrual breakdown"
+    else:
+        lower = text.lower()
+        if lower.startswith("hosting"):
+            period = text[7:].strip() or "last month"
+            query = f"show me the hosting P&L for {period} with accrual breakdown"
+        elif lower.startswith("mining"):
+            period = text[6:].strip() or "last month"
+            query = f"show me the mining P&L for {period} with accrual breakdown"
+        elif lower.startswith("others"):
+            period = text[6:].strip() or "last month"
+            query = f"show me the others P&L breakdown by account category for {period}"
+        else:
+            query = f"show me the full P&L for all business lines {text} with accrual breakdown"
+
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+
+
+@slack_app.command("/finance")
+def handle_finance(ack, respond, command):
+    """
+    /finance [anything]
+    Free-form natural language. Catch-all for any financial question.
+    """
+    ack()
+    text = (command.get("text") or "").strip()
+    if not text:
+        respond("Ask me anything — e.g. `/finance what's our cash position` or `/finance how did we do last quarter`")
+        return
+    process_slash(ack=lambda: None, respond=respond, natural_language_query=text)
+
+
+# ─── Clarification Button Handler ─────────────────────────────────────────
+
+@slack_app.action(re.compile(r"clarify_vendor_.+"))
+def handle_clarification(ack, body, respond):
+    """
+    Handles button taps from clarification messages.
+    The button value contains the fully-formed natural language query.
+    """
+    ack()
+    query = body.get("actions", [{}])[0].get("value", "")
+    if not query:
+        respond("Something went wrong — please try again.", replace_original=True)
+        return
+    logger.info(f"Clarification selected: '{query}'")
+    try:
+        respond("⏳ Got it, looking that up...", replace_original=True)
+        blocks, intent = _run_pipeline(query)
+        respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
+    except Exception as e:
+        logger.error(f"Clarification handler error: {e}")
+        respond("Something went wrong. Please try again.", replace_original=True)
+
+
+# ─── @mention + DM Handlers ───────────────────────────────────────────────
 
 @slack_app.event("app_mention")
 def handle_mention(event, ack, client):
@@ -158,9 +438,8 @@ flask_app = Flask(__name__)
 
 
 def check_api_key():
-    """Returns 401 response if key is wrong, None if OK."""
     if not QB_API_KEY:
-        return None  # No key set — open access
+        return None
     if request.headers.get("X-API-Key", "") != QB_API_KEY:
         return jsonify({"error": "Unauthorised", "status": "error"}), 401
     return None
@@ -173,13 +452,8 @@ def health():
 
 @flask_app.route("/auth", methods=["GET"])
 def auth():
-    """
-    Start QuickBooks OAuth flow.
-    Visit https://qb-slack-agent-production.up.railway.app/auth in browser to re-authorize.
-    """
     import secrets
     from urllib.parse import urlencode
-
     state = secrets.token_urlsafe(16)
     params = {
         "client_id": Config.QB_CLIENT_ID,
@@ -189,72 +463,45 @@ def auth():
         "state": state,
     }
     auth_url = "https://appcenter.intuit.com/connect/oauth2?" + urlencode(params)
-    logger.info(f"Starting QB OAuth flow, redirecting to Intuit...")
     from flask import redirect
     return redirect(auth_url)
 
 
 @flask_app.route("/callback", methods=["GET"])
 def callback():
-    """
-    QuickBooks OAuth callback — exchanges code for tokens and saves to Railway.
-    """
     import requests as req
     from requests.auth import HTTPBasicAuth
-
     code = request.args.get("code")
     error = request.args.get("error")
-
     if error:
-        logger.error(f"QB OAuth error: {error}")
         return f"<h2>❌ Authorization failed: {error}</h2>", 400
-
     if not code:
         return "<h2>❌ No authorization code received.</h2>", 400
-
     try:
-        # Exchange code for tokens
         response = req.post(
             "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
             auth=HTTPBasicAuth(Config.QB_CLIENT_ID, Config.QB_CLIENT_SECRET),
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": Config.QB_REDIRECT_URI,
-            },
+            headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": Config.QB_REDIRECT_URI},
         )
-
         if response.status_code != 200:
-            logger.error(f"Token exchange failed: {response.status_code} — {response.text}")
             return f"<h2>❌ Token exchange failed: {response.text}</h2>", 400
-
         tokens = response.json()
         access_token = tokens["access_token"]
         refresh_token = tokens["refresh_token"]
-
-        logger.info("✅ QB OAuth tokens obtained successfully.")
-
-        # Update in-memory token manager immediately
-        import time
         import qb_agent
         qb_agent._token_manager.access_token = access_token
         qb_agent._token_manager.refresh_token = refresh_token
         qb_agent._token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
         logger.info("✅ In-memory tokens updated.")
-
-        # Persist to Railway so tokens survive future restarts
         qb_agent._persist_tokens_to_railway(access_token, refresh_token)
-
+        # Refresh entity cache with new valid tokens
+        threading.Thread(target=refresh_entity_cache, daemon=True).start()
         return """
         <h2>✅ QuickBooks Authorization Successful!</h2>
-        <p>Tokens have been saved to Railway. The finance agent is now connected to QuickBooks.</p>
+        <p>Tokens saved to Railway. The finance agent is now connected to QuickBooks.</p>
         <p>You can close this window.</p>
         """, 200
-
     except Exception as e:
         logger.error(f"Callback error: {e}")
         return f"<h2>❌ Error: {e}</h2>", 500
@@ -262,23 +509,17 @@ def callback():
 
 @flask_app.route("/auth-status", methods=["GET"])
 def auth_status():
-    """
-    Debug endpoint — shows QB token state and Railway persistence config.
-    Visit https://qb-slack-agent-production.up.railway.app/auth-status to check.
-    """
-    import time
     import qb_agent
     tm = qb_agent._token_manager
     now = time.time()
     expires_in = int(tm.expires_at - now) if tm.expires_at > now else -1
-
     railway_ok = all([
         os.environ.get("RAILWAY_API_TOKEN"),
         os.environ.get("RAILWAY_SERVICE_ID"),
         os.environ.get("RAILWAY_ENVIRONMENT_ID"),
         os.environ.get("RAILWAY_PROJECT_ID"),
     ])
-
+    from qb_interpreter import _entity_cache
     return jsonify({
         "token_state": {
             "has_access_token": bool(tm.access_token),
@@ -293,54 +534,31 @@ def auth_status():
             "has_environment_id": bool(os.environ.get("RAILWAY_ENVIRONMENT_ID")),
             "has_project_id": bool(os.environ.get("RAILWAY_PROJECT_ID")),
         },
+        "entity_cache": {
+            "loaded": _entity_cache.get("loaded", False),
+            "vendor_count": len(_entity_cache.get("vendors", [])),
+            "customer_count": len(_entity_cache.get("customers", [])),
+            "age_seconds": int(time.time() - _entity_cache.get("loaded_at", 0)),
+        },
         "action": "Visit /auth to re-authorize QuickBooks" if expires_in < 0 else "OK"
     })
 
 
 @flask_app.route("/query", methods=["POST"])
 def query():
-    """
-    Agent-to-agent query endpoint.
-    Returns plain structured JSON — no Slack formatting.
-
-    Request:
-      POST /query
-      X-API-Key: <QB_API_KEY>
-      Content-Type: application/json
-      { "query": "what were our total expenses last month?" }
-
-    Response:
-      {
-        "status": "ok",
-        "question": "...",
-        "answer": "...",         ← plain text direct answer
-        "data": {                ← full structured result for coordinator to use
-          "key_findings": [...],
-          "proactive_flags": [...],
-          "detail_table": {...},
-          "data_completeness": "complete|partial|incomplete"
-        }
-      }
-    """
     auth_error = check_api_key()
     if auth_error:
         return auth_error
-
     body = request.get_json(silent=True)
     if not body or not body.get("query"):
         return jsonify({"error": "Missing 'query' field", "status": "error"}), 400
-
     question = body["query"].strip()
     if not question:
         return jsonify({"error": "Query cannot be empty", "status": "error"}), 400
-
     logger.info(f"HTTP /query: '{question}'")
-
     try:
-        # Full pipeline — same as Slack path
         interpreter_result = interpret_and_fetch(question)
         analysis = analyse(interpreter_result)
-
         return jsonify({
             "status": "ok",
             "question": question,
@@ -354,13 +572,44 @@ def query():
                 "data_note": analysis.get("data_note", ""),
             }
         })
-
     except Exception as e:
         logger.error(f"HTTP query error: {e}")
         return jsonify({"error": str(e), "status": "error"}), 500
 
 
-# ── Entrypoint ─────────────────────────────────────────────────────────────
+# ── Startup ────────────────────────────────────────────────────────────────
+
+def _startup_tasks():
+    """
+    Run on startup in a background thread:
+    1. Check QB token health — logs warning if broken, tells admin what to do
+    2. Warm entity cache (vendor + customer lists)
+    3. Schedule 24h cache refresh
+    """
+    import qb_agent as _qb_agent
+
+    # Step 1 — Token health check
+    logger.info("🔍 Checking QB token health...")
+    health = _qb_agent.check_token_health()
+    if not health["healthy"]:
+        logger.error("❌ QB token is broken at startup — queries will fail until re-authorized.")
+        logger.error("👉 Visit https://qb-slack-agent-production.up.railway.app/auth to fix.")
+    else:
+        # Step 2 — Warm entity cache (only if token is healthy)
+        warm_cache()
+
+        # Step 3 — Schedule 24h cache refresh
+        def _refresh_loop():
+            while True:
+                time.sleep(86400)  # 24 hours
+                logger.info("⏰ 24h cache refresh triggered")
+                try:
+                    warm_cache()
+                except Exception as e:
+                    logger.error(f"Scheduled cache refresh failed: {e}")
+
+        threading.Thread(target=_refresh_loop, daemon=True).start()
+
 
 if __name__ == "__main__":
     logger.info("⚡ QB Slack Agent is starting...")
@@ -371,6 +620,9 @@ if __name__ == "__main__":
         daemon=True,
     ).start()
     logger.info(f"🌐 HTTP API listening on port {port}")
+
+    # Run startup tasks in background (token check + cache warm)
+    threading.Thread(target=_startup_tasks, daemon=True).start()
 
     handler = SocketModeHandler(slack_app, Config.SLACK_APP_TOKEN)
     handler.start()

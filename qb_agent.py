@@ -142,12 +142,13 @@ def _upsert_railway_variable(railway_token: str, project_id: str, environment_id
     return False
 
 
-def _persist_tokens_to_railway(access_token: str, refresh_token: str):
+def _persist_tokens_to_railway(access_token: str, refresh_token: str, retry: bool = True):
     """
     Write new QB tokens back to Railway environment variables.
     This ensures tokens survive container restarts and redeployments.
     Uses RAILWAY_API_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_ENVIRONMENT_ID, RAILWAY_PROJECT_ID
     — all injected automatically by Railway except RAILWAY_API_TOKEN.
+    Retries once on failure.
     """
     railway_token = os.environ.get("RAILWAY_API_TOKEN", "")
     service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
@@ -169,10 +170,38 @@ def _persist_tokens_to_railway(access_token: str, refresh_token: str):
         if ok1 and ok2:
             logger.info("✅ Tokens persisted to Railway env vars successfully.")
         else:
-            logger.warning("⚠️ Railway token persist partially failed — check logs above.")
+            logger.warning("⚠️ Railway token persist partially failed.")
+            if retry:
+                logger.info("Retrying Railway token persist in 3s...")
+                time.sleep(3)
+                _persist_tokens_to_railway(access_token, refresh_token, retry=False)
 
     except Exception as e:
         logger.warning(f"Railway token persist error (non-fatal): {e}")
+        if retry:
+            try:
+                time.sleep(3)
+                _persist_tokens_to_railway(access_token, refresh_token, retry=False)
+            except Exception:
+                pass
+
+
+def check_token_health() -> dict:
+    """
+    Check QB token health on startup.
+    Attempts a proactive refresh if token is expired.
+    Returns status dict — logged by app.py on boot.
+    """
+    try:
+        # This triggers a refresh if expired
+        _token_manager.get_access_token()
+        expires_in = int(_token_manager.expires_at - time.time())
+        logger.info(f"✅ QB token healthy — expires in {expires_in}s ({expires_in // 60}min)")
+        return {"healthy": True, "expires_in_seconds": expires_in}
+    except Exception as e:
+        logger.error(f"❌ QB token refresh failed on startup: {e}")
+        logger.error("👉 Visit https://qb-slack-agent-production.up.railway.app/auth to re-authorize QuickBooks")
+        return {"healthy": False, "error": str(e)}
 
 
 # Singleton token manager — shared across all requests

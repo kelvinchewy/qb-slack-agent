@@ -234,10 +234,14 @@ missing words, different punctuation, shorthand all count as a match.
 Always use the EXACT QB name in the SQL — never the user's version.
 
 DEFAULT DATE RULE:
-If no date or period is specified, default to the current calendar month:
-  start_date = first day of current month
+If no date or period is specified:
+- For Bill / Invoice / vendor / customer queries: default to past 3 completed months
+  start_date = first day of month 3 months ago
   end_date = today ({TODAY_ISO})
-For balance sheet with no date specified, use today.
+- For balance sheet: use today
+- For P&L summary / quarterly: use last completed month
+  start_date = first day of last month
+  end_date = last day of last month
   "calls": [
     {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}},
     {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-02-01' AND TxnDate <= '2026-02-28' ORDERBY TxnDate DESC MAXRESULTS 100"}}
@@ -525,54 +529,92 @@ def _generate_name_examples(names: list[str]) -> list[str]:
 
 
 # Module-level cache — fetched once per process, refreshed if empty
-_entity_cache: dict = {"vendors": [], "customers": [], "context": "", "loaded": False}
+_entity_cache: dict = {
+    "vendors": [],
+    "customers": [],
+    "context": "",
+    "loaded": False,
+    "loaded_at": 0.0,  # epoch timestamp of last successful load
+}
+
+CACHE_TTL_SECONDS = 86400  # 24 hours
+
+
+def warm_cache():
+    """
+    Load vendor + customer lists from QB and populate the cache.
+    Called at startup in a background thread and every 24h thereafter.
+    Safe to call multiple times — idempotent.
+    """
+    import time
+    global _entity_cache
+    try:
+        logger.info("🔄 Warming entity cache (vendor + customer lists)...")
+        vendors = _fetch_all_vendors()
+        customers = _fetch_all_customers()
+        context = _build_context_string(vendors, customers)
+        _entity_cache = {
+            "vendors": vendors,
+            "customers": customers,
+            "context": context,
+            "loaded": True,
+            "loaded_at": time.time(),
+        }
+        logger.info(f"✅ Entity cache warm — {len(vendors)} vendors, {len(customers)} customers")
+    except Exception as e:
+        logger.error(f"Entity cache warm failed: {e}")
+
+
+def _cache_is_fresh() -> bool:
+    import time
+    if not _entity_cache["loaded"]:
+        return False
+    age = time.time() - _entity_cache.get("loaded_at", 0)
+    return age < CACHE_TTL_SECONDS
+
+
+def refresh_entity_cache():
+    """Force a full refresh of the vendor/customer cache. Call after adding new vendors in QB."""
+    global _entity_cache
+    _entity_cache["loaded"] = False
+    _entity_cache["loaded_at"] = 0.0
+    warm_cache()
+    logger.info("Entity cache force-refreshed.")
+
+
+def _build_context_string(vendors: list, customers: list) -> str:
+    """Build the planner context string from vendor/customer lists."""
+    lines = []
+    if vendors:
+        lines.append("REAL QB VENDOR NAMES — AP (Accounts Payable) — use Bill entity for these:")
+        for v in vendors:
+            lines.append(f"  - {v}")
+        vendor_examples = _generate_name_examples(vendors)
+        if vendor_examples:
+            lines.append("\nVendor fuzzy match examples (user shorthand → exact QB name):")
+            lines.extend(vendor_examples)
+    if customers:
+        lines.append("\nREAL QB CUSTOMER NAMES — AR (Accounts Receivable) — use Invoice entity for these:")
+        for c in customers:
+            lines.append(f"  - {c}")
+        customer_examples = _generate_name_examples(customers)
+        if customer_examples:
+            lines.append("\nCustomer fuzzy match examples (user shorthand → exact QB name):")
+            lines.extend(customer_examples)
+    lines.append("\nCROSS-REFERENCE RULE: If a name appears in the VENDOR list → use Bill. If in CUSTOMER list → use Invoice.")
+    return "\n".join(lines)
 
 
 def _build_entity_context() -> str:
     """
-    Fetch real vendor and customer names from QB and return as planner context.
-    Cached at module level — fetched once per process startup, not on every query.
+    Return vendor/customer context string for the planner.
+    Uses cache if fresh, otherwise triggers a warm.
     """
-    global _entity_cache
-
-    # Return cached version if already loaded
-    if _entity_cache["loaded"] and _entity_cache["context"]:
+    if _cache_is_fresh():
         return _entity_cache["context"]
-
-    try:
-        vendors = _fetch_all_vendors()
-        customers = _fetch_all_customers()
-        _entity_cache["vendors"] = vendors
-        _entity_cache["customers"] = customers
-        _entity_cache["loaded"] = True
-        lines = []
-
-        if vendors:
-            lines.append("REAL QB VENDOR NAMES — AP (Accounts Payable) — use Bill entity for these:")
-            for v in vendors:
-                lines.append(f"  - {v}")
-            vendor_examples = _generate_name_examples(vendors)
-            if vendor_examples:
-                lines.append("\nVendor fuzzy match examples (user shorthand → exact QB name):")
-                lines.extend(vendor_examples)
-
-        if customers:
-            lines.append("\nREAL QB CUSTOMER NAMES — AR (Accounts Receivable) — use Invoice entity for these:")
-            for c in customers:
-                lines.append(f"  - {c}")
-            customer_examples = _generate_name_examples(customers)
-            if customer_examples:
-                lines.append("\nCustomer fuzzy match examples (user shorthand → exact QB name):")
-                lines.extend(customer_examples)
-
-        lines.append("\nCROSS-REFERENCE RULE: If a name appears in the VENDOR list → use Bill. If in CUSTOMER list → use Invoice.")
-
-        context = "\n".join(lines)
-        _entity_cache["context"] = context
-        return context
-    except Exception as e:
-        logger.warning(f"Could not fetch entity lists: {e}")
-        return _entity_cache.get("context", "")  # Return stale cache if available
+    # Cache stale or empty — warm it now (synchronous fallback)
+    warm_cache()
+    return _entity_cache.get("context", "")
 
 
 def _plan_calls(question: str, intent: str) -> dict:
