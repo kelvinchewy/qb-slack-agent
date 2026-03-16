@@ -515,7 +515,8 @@ def callback():
             data={"grant_type": "authorization_code", "code": code, "redirect_uri": Config.QB_REDIRECT_URI},
         )
         if response.status_code != 200:
-            return f"<h2>❌ Token exchange failed: {response.text}</h2>", 400
+            logger.error(f"Token exchange failed: {response.status_code} — {response.text}")
+            return "<h2>❌ Token exchange failed. Please try authorizing again.</h2>", 400
         tokens = response.json()
         access_token = tokens["access_token"]
         refresh_token = tokens["refresh_token"]
@@ -524,7 +525,9 @@ def callback():
         qb_agent._token_manager.refresh_token = refresh_token
         qb_agent._token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
         logger.info("✅ In-memory tokens updated.")
-        qb_agent._persist_tokens_to_railway(access_token, refresh_token)
+        # Persist both tokens to Railway in background — this is the only place
+        # QB_ACCESS_TOKEN is written to Railway (once per OAuth flow, not per refresh).
+        threading.Thread(target=qb_agent._persist_tokens_to_railway, args=(access_token, refresh_token), daemon=True).start()
         # Refresh entity cache with new valid tokens
         threading.Thread(target=refresh_entity_cache, daemon=True).start()
         return """
@@ -534,7 +537,7 @@ def callback():
         """, 200
     except Exception as e:
         logger.error(f"Callback error: {e}")
-        return f"<h2>❌ Error: {e}</h2>", 500
+        return "<h2>❌ Authorization error. Please try again or contact your admin.</h2>", 500
 
 
 @flask_app.route("/auth-status", methods=["GET"])
@@ -604,7 +607,7 @@ def query():
         })
     except Exception as e:
         logger.error(f"HTTP query error: {e}")
-        return jsonify({"error": str(e), "status": "error"}), 500
+        return jsonify({"error": "Internal error processing query.", "status": "error"}), 500
 
 
 # ── Startup ────────────────────────────────────────────────────────────────

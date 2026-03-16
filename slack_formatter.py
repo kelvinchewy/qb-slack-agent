@@ -59,15 +59,18 @@ def format_dynamic_analysis(analysis: dict) -> list[dict]:
     """
     Formats qb_analyst output into tight CFO-readable Slack blocks.
     Routes to specialist renderers for pnl_by_line and summary_grid.
+    Caps at 49 blocks — Slack silently drops messages exceeding 50 blocks.
     """
     report_type = analysis.get("report_type", "standard")
 
     if report_type == "pnl_by_line":
-        return _format_pnl_by_line(analysis)
+        blocks = _format_pnl_by_line(analysis)
     elif report_type == "summary_grid":
-        return _format_summary_grid(analysis)
+        blocks = _format_summary_grid(analysis)
     else:
-        return _format_standard(analysis)
+        blocks = _format_standard(analysis)
+
+    return blocks[:49]
 
 
 def _format_standard(analysis: dict) -> list[dict]:
@@ -149,6 +152,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
     blocks.append(divider())
     blocks.append(section(direct_answer))
 
+    currency = analysis.get("currency", "MYR")
+
     # Business line breakdown blocks
     if business_lines:
         line_configs = [
@@ -169,8 +174,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
             blocks.append(divider())
             blocks.append(section(
                 f"*{label}*\n"
-                f"Revenue: `MYR {rev:,.0f}`   Costs: `MYR {costs:,.0f}`   "
-                f"Net: `{net_sign}MYR {net:,.0f}`"
+                f"Revenue: `{currency} {rev:,.0f}`   Costs: `{currency} {costs:,.0f}`   "
+                f"Net: `{net_sign}{currency} {net:,.0f}`"
             ))
 
         total = business_lines.get("total")
@@ -182,8 +187,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
             t_sign = "+" if t_net >= 0 else ""
             blocks.append(section(
                 f"*━━━ COMBINED TOTAL ━━━*\n"
-                f"Revenue: `MYR {t_rev:,.0f}`   Costs: `MYR {t_costs:,.0f}`   "
-                f"Net: `{t_sign}MYR {t_net:,.0f}`"
+                f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
+                f"Net: `{t_sign}{currency} {t_net:,.0f}`"
             ))
 
     # Line item table (actuals vs accruals)
@@ -233,6 +238,8 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
     blocks.append(divider())
     blocks.append(section(direct_answer))
 
+    currency = analysis.get("currency", "MYR")
+
     if business_lines:
         blocks.append(divider())
         headers_row = ["", "Hosting", "Mining", "Others", "Total"]
@@ -241,7 +248,7 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
             row = [label]
             for key in ["hosting", "mining", "others", "total"]:
                 val = business_lines.get(key, {}).get(metric, 0)
-                row.append(f"MYR {val:,.0f}" if val != 0 else "—")
+                row.append(f"{currency} {val:,.0f}" if val != 0 else "—")
             rows.append(row)
         blocks.extend(_render_table(headers_row, rows))
 
@@ -294,7 +301,7 @@ def _render_table(headers: list, rows: list) -> list[dict]:
             lines.append(f"`{separator}`")
 
         for row in chunk:
-            row_line = "  ".join(str(row[i]).ljust(col_widths[i]) if i < len(row) else "" for i in range(len(headers)))
+            row_line = "  ".join(str(row[i]).ljust(col_widths[i]) if i < len(row) else " " * col_widths[i] for i in range(len(headers)))
             lines.append(f"`{row_line}`")
 
         blocks.append(section("\n".join(lines)))

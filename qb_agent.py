@@ -71,8 +71,14 @@ class TokenManager:
         return time.time() >= (self.expires_at - REFRESH_BUFFER_SECONDS)
 
     def _refresh(self):
-        """Exchange refresh token for a new access token and persist to Railway."""
+        """Exchange refresh token for a new access token. Updates in-memory.
+        If QB rotates the refresh token, persists only QB_REFRESH_TOKEN to Railway
+        in a background thread. QB_ACCESS_TOKEN is never written to Railway — doing
+        so triggers an infinite Railway redeploy loop (Railway deploys on var change).
+        """
+        import threading as _threading
         try:
+            old_refresh_token = self.refresh_token
             response = requests.post(
                 TOKEN_URL,
                 auth=HTTPBasicAuth(Config.QB_CLIENT_ID, Config.QB_CLIENT_SECRET),
@@ -84,6 +90,7 @@ class TokenManager:
                     "grant_type": "refresh_token",
                     "refresh_token": self.refresh_token,
                 },
+                timeout=15,
             )
 
             if response.status_code != 200:
@@ -95,10 +102,18 @@ class TokenManager:
             self.refresh_token = tokens.get("refresh_token", self.refresh_token)
             self.expires_at = time.time() + tokens.get("expires_in", 3600)
 
-            logger.info("✅ QB access token refreshed successfully.")
-            # NOTE: tokens are NOT persisted to Railway here — persisting on every
-            # in-memory refresh updates env vars which triggers a Railway redeploy loop.
-            # Tokens are only persisted to Railway in the OAuth callback (/callback).
+            logger.info("✅ QB access token refreshed successfully (in-memory only).")
+
+            # If QB rotated the refresh token, persist only QB_REFRESH_TOKEN to Railway.
+            # We never persist QB_ACCESS_TOKEN — it changes every hour and would trigger
+            # a new Railway deployment on every refresh (infinite deploy loop).
+            if self.refresh_token != old_refresh_token:
+                logger.info("QB refresh token rotated — persisting new QB_REFRESH_TOKEN to Railway...")
+                _threading.Thread(
+                    target=_persist_refresh_token_to_railway,
+                    args=(self.refresh_token,),
+                    daemon=True,
+                ).start()
 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
@@ -184,6 +199,32 @@ def _persist_tokens_to_railway(access_token: str, refresh_token: str, retry: boo
                 _persist_tokens_to_railway(access_token, refresh_token, retry=False)
             except Exception:
                 pass
+
+
+def _persist_refresh_token_to_railway(refresh_token: str):
+    """
+    Persist only QB_REFRESH_TOKEN to Railway env vars.
+    Called in a background thread when QB rotates the refresh token during refresh.
+    We never persist QB_ACCESS_TOKEN to Railway — it changes every hour and triggers
+    an infinite Railway redeploy loop (Railway deploys on any variable change).
+    """
+    railway_token = os.environ.get("RAILWAY_API_TOKEN", "")
+    service_id = os.environ.get("RAILWAY_SERVICE_ID", "")
+    environment_id = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+    project_id = os.environ.get("RAILWAY_PROJECT_ID", "")
+
+    if not railway_token or not all([service_id, environment_id, project_id]):
+        logger.warning("Railway config incomplete — QB_REFRESH_TOKEN not persisted.")
+        return
+
+    try:
+        ok = _upsert_railway_variable(railway_token, project_id, environment_id, service_id, "QB_REFRESH_TOKEN", refresh_token)
+        if ok:
+            logger.info("✅ QB_REFRESH_TOKEN persisted to Railway.")
+        else:
+            logger.warning("⚠️ Failed to persist QB_REFRESH_TOKEN to Railway.")
+    except Exception as e:
+        logger.warning(f"QB_REFRESH_TOKEN persist error (non-fatal): {e}")
 
 
 def check_token_health() -> dict:

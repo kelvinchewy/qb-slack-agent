@@ -77,7 +77,8 @@ Respond with this JSON:
     "total": {{"revenue": 0, "costs": 0, "net": 0}}
   }},
   "data_completeness": "complete | partial | incomplete",
-  "data_note": "Only if something is missing or unclear. Empty string if clean."
+  "data_note": "Only if something is missing or unclear. Empty string if clean.",
+  "currency": "MYR"
 }}
 
 For VENDOR/BILL queries:
@@ -176,13 +177,16 @@ def analyse(interpreter_result: dict) -> dict:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=8000,
             system=_build_analyst_system(),
             messages=[{
                 "role": "user",
                 "content": f"User question: {question}\n\nQuery intent: {intent}{entity_context}\n\nQuickBooks data:\n{data_context}"
             }],
         )
+
+        if response.stop_reason == "max_tokens":
+            logger.error(f"Analyst response truncated at max_tokens — JSON will be invalid. Question: '{question}'")
 
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
@@ -195,6 +199,7 @@ def analyse(interpreter_result: dict) -> dict:
         # Ensure new fields have defaults if analyst didn't populate them
         analysis.setdefault("report_type", "standard")
         analysis.setdefault("business_lines", None)
+        analysis.setdefault("currency", "MYR")
 
         logger.info(f"Analysis complete. Type: {analysis.get('report_type')} | Complexity: {query_complexity} | Flags: {len(analysis.get('proactive_flags', []))}")
         return analysis

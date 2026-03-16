@@ -615,7 +615,7 @@ def _plan_calls(question: str, intent: str) -> dict:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1000,
+            max_tokens=2000,
             system=system,
             messages=[{"role": "user", "content": enriched_question}],
         )
@@ -675,7 +675,9 @@ def interpret_and_fetch(user_question: str) -> dict:
     resolved_customers = []
     entity = _detect_entity(user_question)
     if entity.get("type") == "vendor" and entity.get("term"):
-        vendor_list = _entity_cache.get("vendors") or _fetch_all_vendors()
+        if not _entity_cache.get("vendors"):
+            warm_cache()
+        vendor_list = _entity_cache.get("vendors", [])
         matches = _resolve_vendor_name(entity["term"], vendor_list)
         if matches:
             resolved_vendors = matches
@@ -683,7 +685,9 @@ def interpret_and_fetch(user_question: str) -> dict:
         else:
             logger.info(f"No vendor match for '{entity['term']}' — analyst will scan all results")
     elif entity.get("type") == "customer" and entity.get("term"):
-        customer_list = _entity_cache.get("customers") or _fetch_all_customers()
+        if not _entity_cache.get("customers"):
+            warm_cache()
+        customer_list = _entity_cache.get("customers", [])
         matches = _resolve_customer_name(entity["term"], customer_list)
         if matches:
             resolved_customers = matches
