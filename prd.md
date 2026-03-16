@@ -2,7 +2,7 @@
 
 **Project:** QB Finance Agent
 **Owner:** Kelvin (kelvin@hashing.com)
-**Version:** 4.1
+**Version:** 4.2
 **Last Updated:** March 16, 2026
 **Status:** Sprint 3 in progress — Multi-currency, month-by-month breakdown, Business Line P&L
 
@@ -83,6 +83,8 @@ QB multi-currency is enabled. This creates mixed-currency data across business l
 - `as_of_date` = last day of the queried period
 - Rate interpretation: 1 USD = Rate MYR (e.g. Rate = 4.450 means 1 USD = MYR 4.450)
 - Always shown in output footnote: *"Converted at QB rate: 1 USD = MYR X (as of YYYY-MM-DD)"*
+
+**Known issue — Northstar invoice exchange rates in QB:** Northstar invoices are recorded in USD. If the exchange rate stored on the invoice in QB is incorrect (e.g. inverted), the MYR revenue figure in the P&L report will be wrong. This is a bookkeeping fix — correct the exchange rate field on each Northstar invoice in QB directly. The agent reports whatever QB returns; it does not validate exchange rates.
 
 **Conversion rules:**
 - MYR → USD: divide by rate
@@ -313,6 +315,28 @@ Net Others                       RM-128,194
 ```
 
 `/pnl all` shows all three blocks above followed by a combined total row.
+
+**Combined multi-line example (`/pnl mining and hosting`):**
+```
+━━━ MINING ━━━
+Revenue: MYR 191,714   Costs: MYR 243,349   Net: MYR -51,635
+
+━━━ HOSTING ━━━
+Revenue: MYR 134,960   Costs: MYR 98,253    Net: MYR 36,707
+
+Account                    Amount (MYR)   Type        % of Total
+Revenue:Realised                      0   actual           0.0%
+Revenue:Un-Realised           191,714     (accrued)      100.0%
+Utility - Nexbase             199,349     (accrued)       81.9%
+Rent or lease                  44,000     actual          18.1%
+MINING NET                    -51,635
+[blank]
+Northstar Invoice(s)          134,960     actual         100.0%
+Utility - AA                   98,253     (accrued)      100.0%
+HOSTING NET                    36,707
+[blank]
+COMBINED NET                   -14,928
+```
 
 #### P&L Detail Table Format
 
@@ -751,6 +775,10 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 | Mar 2026 | Default currency = as-is from QB, conversion on-demand | Avoids silent conversion errors; user opts in explicitly with "in USD" / "in MYR" |
 | Mar 2026 | Month-by-month breakdown = one QB call per calendar month | Analyst needs separate reports per month to build per-month rows; single aggregate call loses monthly granularity |
 | Mar 2026 | Month-by-month row filter bypass in formatter | Formatter row filter designed for account-name rows; month rows ("Oct 2025") don't contain business line keywords and were being stripped |
+| Mar 2026 | Combined P&L uses per-account rows per section, not summary labels | "MINING REVENUE" / "HOSTING COSTS" labels are meaningless — actual QB account names give context |
+| Mar 2026 | Revenue queries always route to ProfitAndLoss, never Invoice | Mining revenue (Revenue:Realised, Un-Realised) lives in P&L accounts; routing to Invoice returns zero |
+| Mar 2026 | "COMBINED NET" added to formatter row filter passthrough | Combined multi-line P&L net row was being silently stripped by business-line keyword filter |
+| Mar 2026 | max_tokens raised to 6000 | Prompt growth from detail table specs + currency rules exceeded 4000 token output budget |
 
 ---
 
