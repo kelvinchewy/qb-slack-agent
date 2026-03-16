@@ -96,9 +96,9 @@ class TokenManager:
             self.expires_at = time.time() + tokens.get("expires_in", 3600)
 
             logger.info("✅ QB access token refreshed successfully.")
-
-            # Persist new tokens to Railway so they survive container restarts
-            _persist_tokens_to_railway(self.access_token, self.refresh_token)
+            # NOTE: tokens are NOT persisted to Railway here — persisting on every
+            # in-memory refresh updates env vars which triggers a Railway redeploy loop.
+            # Tokens are only persisted to Railway in the OAuth callback (/callback).
 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
