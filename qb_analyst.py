@@ -55,12 +55,13 @@ OTHERS:
 - Single bucket total in /summary; expanded by account name in /pnl others
 
 CURRENCY CONVERSION — rules:
-- Default: report all amounts in whatever currency QB recorded them (MYR unless otherwise noted).
+- Default: report all amounts in MYR. Set "currency": "MYR" in the JSON response.
 - If an ExchangeRate result is present in the data AND user requested a specific currency:
     - Extract rate from ExchangeRate result: ExchangeRate.Rate = how many MYR per 1 USD (e.g. 4.450)
     - "in USD": divide MYR amounts by rate → USD. Multiply USD amounts by rate first to normalise, then divide.
     - "in MYR": multiply USD amounts by rate → MYR. MYR amounts stay as-is.
     - Apply conversion to ALL figures: revenue, costs, net, business_lines dict, and detail_table amounts.
+    - Set "currency" to the TARGET currency code (e.g. "USD" if user asked "in USD", "MYR" otherwise).
     - Label every amount with the target currency code. Add a footnote in data_note: "Converted at QB rate: 1 USD = MYR X (as of YYYY-MM-DD)".
 - If no ExchangeRate result is present: report amounts in their original QB currency — never guess or invent a rate.
 - For mixed-currency data (e.g. hosting revenue in USD, costs in MYR): convert everything to one currency using the QB rate before computing net. Flag this in data_note.
@@ -87,7 +88,8 @@ Respond with this JSON:
   "proactive_flags": ["Only real actionable issues. Empty [] if none."],
   "summary_line": "Under 80 chars. The one thing a CFO needs to know.",
   "has_detail_table": true,
-  "report_type": "standard | pnl_by_line | summary_grid | vendor_list | invoice_list",
+  "report_type": "standard | pnl_by_line | pnl_monthly | summary_grid | vendor_list | invoice_list",
+  "currency": "MYR",
   "detail_table": {{
     "headers": ["Account", "Amount", "Type"],
     "rows": [["Utility - AA electricity", "MYR 79", "actual"],
@@ -170,6 +172,7 @@ For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining a
   always use the actual QB account names.
 
 For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
+- report_type = "pnl_monthly"
 - Each call result is a separate monthly P&L — labelled with its date range
 - Extract the relevant business line figures from EACH monthly report separately
 - Build one table row per month, sorted chronologically (oldest first)
@@ -179,7 +182,8 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - Column format depends on business line:
     Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Net
     Hosting: Month | Revenue (Northstar) | Utility-AA | Net
-    Others / any other line: Month | Revenue (MYR) | Costs (MYR) | Net (MYR) | Notes
+    Others / any other line: Month | Revenue | Costs | Net | Notes
+- If currency was converted, use the converted currency in column headers (e.g. "Revenue (USD)")
 
 NEVER collapse multiple rows into a single "Net Result" row as the only table row.
 NEVER omit the Revenue:Realised or Revenue:Un-Realised rows if they appear in QB data.
@@ -311,6 +315,7 @@ def analyse(interpreter_result: dict) -> dict:
         # Ensure new fields have defaults if analyst didn't populate them
         analysis.setdefault("report_type", "standard")
         analysis.setdefault("business_lines", None)
+        analysis.setdefault("currency", "MYR")
 
         logger.info(f"Analysis complete. Type: {analysis.get('report_type')} | Complexity: {query_complexity} | Flags: {len(analysis.get('proactive_flags', []))}")
         return analysis

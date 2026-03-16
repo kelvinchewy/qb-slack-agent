@@ -358,31 +358,40 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
 
 def _render_table(headers: list, rows: list) -> list[dict]:
     """
-    Renders a data table using Slack's native table block.
-    First column left-aligned (labels), remaining columns right-aligned (numbers).
-    Slack renders this natively with proper column alignment.
+    Renders a data table as a rich_text_preformatted block.
+    Guarantees true monospace rendering across all Slack clients.
+    First column left-aligned (labels), remaining columns right-justified (numbers).
     """
-    # Determine alignment: first col = left (labels), rest = right (numeric values)
     col_count = len(headers)
-    column_settings = [
-        {"align": "left" if i == 0 else "right", "is_wrapped": False}
-        for i in range(col_count)
-    ]
 
-    # Header row
-    table_rows = [
-        [{"type": "raw_text", "text": str(h)} for h in headers]
-    ]
-
-    # Data rows
+    # Compute column widths
+    col_widths = [len(str(h)) for h in headers]
     for row in rows:
-        cells = []
-        for i in range(col_count):
-            text = str(row[i]) if i < len(row) else ""
-            cells.append({"type": "raw_text", "text": text})
-        table_rows.append(cells)
+        for i, cell in enumerate(row):
+            if i < col_count:
+                col_widths[i] = max(col_widths[i], len(str(cell)))
 
-    return [{"type": "table", "column_settings": column_settings, "rows": table_rows}]
+    def _fmt_row(cells: list) -> str:
+        parts = []
+        for i in range(col_count):
+            val = str(cells[i]) if i < len(cells) else ""
+            # First column left-justified, rest right-justified
+            parts.append(val.ljust(col_widths[i]) if i == 0 else val.rjust(col_widths[i]))
+        return "  ".join(parts)
+
+    header_line = _fmt_row(headers)
+    separator = "  ".join("-" * col_widths[i] for i in range(col_count))
+
+    lines = [header_line, separator] + [_fmt_row(row) for row in rows]
+    text = "\n".join(lines)
+
+    return [{
+        "type": "rich_text",
+        "elements": [{
+            "type": "rich_text_preformatted",
+            "elements": [{"type": "text", "text": text}]
+        }]
+    }]
 
 
 

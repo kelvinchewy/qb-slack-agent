@@ -132,7 +132,10 @@ def _slash_worker(respond, natural_language_query: str, thinking_done: bool = Fa
         respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
     except Exception as e:
         logger.error(f"Slash command error: {e}")
-        respond(text="Something went wrong. Please try again.", replace_original=True)
+        try:
+            respond(text="Something went wrong. Please try again.", replace_original=True)
+        except Exception:
+            pass
 
 
 def process_slash(respond, natural_language_query: str):
