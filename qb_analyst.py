@@ -109,7 +109,7 @@ For TOP VENDORS / VENDOR RANKINGS:
 - Detail table: Rank, Vendor, Total Billed, # Bills, % of Total
 - Sort descending by total billed
 
-For P&L BY BUSINESS LINE (/pnl):
+For P&L BY BUSINESS LINE (/pnl) and ANY P&L request:
 - Use ProfitAndLoss report data, classify each account by business line rules above
 - Flag Journal Entries as (accrued)
 - report_type = "pnl_by_line"
@@ -117,6 +117,44 @@ For P&L BY BUSINESS LINE (/pnl):
 - BUT: if user asked for a specific line (e.g. "mining P&L"), scope direct_answer, key_findings,
   and proactive_flags to ONLY that line — do not mention other lines in the prose
 - The formatter will handle filtering the display — just populate business_lines fully
+
+DETAIL TABLE FOR P&L — mandatory structure, no exceptions:
+
+For SINGLE PERIOD Mining P&L (one ProfitAndLoss call):
+Columns: Account | Amount (MYR) | Type | % of Total
+Required rows (one row each, skip only if value is truly zero in QB):
+  1. Revenue:Realised          → amount from QB, actual
+  2. Revenue:Un-Realised       → amount from QB, (accrued) if Journal Entry
+  3. [blank separator row]
+  4. Utility - Nexbase         → amount from QB, (accrued) if Journal Entry
+  5. Rent or lease             → amount from QB, actual
+  6. [blank separator row]
+  7. NET RESULT                → revenue minus costs
+
+For SINGLE PERIOD Hosting P&L:
+  1. Northstar Invoice(s)      → total invoiced, actual
+  2. Utility - AA              → amount from QB, (accrued) if Journal Entry
+  3. NET RESULT
+
+For SINGLE PERIOD Others P&L:
+  One row per expense account. List ALL accounts, sorted by amount descending.
+  Add NET RESULT at bottom.
+
+For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
+- Each call result is a separate monthly P&L — labelled with its date range
+- Extract the relevant business line figures from EACH monthly report separately
+- Build one table row per month, sorted chronologically (oldest first)
+- Add a TOTAL row at the bottom
+- direct_answer must reference the total across all months AND call out the best/worst month
+- Notes column: flag if revenue is all unrealised, or if month has zero revenue
+- Column format depends on business line:
+    Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Net
+    Hosting: Month | Revenue (Northstar) | Utility-AA | Net
+    Others / any other line: Month | Revenue (MYR) | Costs (MYR) | Net (MYR) | Notes
+
+NEVER collapse multiple rows into a single "Net Result" row as the only table row.
+NEVER omit the Revenue:Realised or Revenue:Un-Realised rows if they appear in QB data.
+NEVER omit the Utility-Nexbase or Rent or lease rows if they have non-zero values.
 
 For SUMMARY GRID (/summary):
 - report_type = "summary_grid"
