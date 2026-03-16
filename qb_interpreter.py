@@ -18,10 +18,15 @@ import qb_agent
 
 logger = logging.getLogger(__name__)
 
-TODAY = datetime.now().strftime("%B %d, %Y")
-TODAY_ISO = datetime.now().strftime("%Y-%m-%d")
-CURRENT_YEAR = datetime.now().year
-CURRENT_MONTH = datetime.now().strftime("%B")
+
+def _today() -> str:
+    """Current date as human-readable string. Called fresh on every use."""
+    return datetime.now().strftime("%B %d, %Y")
+
+
+def _today_iso() -> str:
+    """Current date as ISO string. Called fresh on every use."""
+    return datetime.now().strftime("%Y-%m-%d")
 
 # ─── Step 0: Classifier ───────────────────────────────────────────────
 
@@ -167,9 +172,13 @@ NEVER generate WHERE filters on: AccountRef.name, CustomerRef.name — always 40
 
 # ─── Step 1: Retrieval Planner ────────────────────────────────────────
 
-RETRIEVAL_SYSTEM = f"""You are a QuickBooks query generator for a Bitcoin mining company.
+def _build_retrieval_system() -> str:
+    """Build retrieval planner prompt with fresh date on every call."""
+    today = _today()
+    today_iso = _today_iso()
+    return f"""You are a QuickBooks query generator for a Bitcoin mining company.
 
-Today is {TODAY}.
+Today is {today}.
 
 {QB_SCHEMA}
 
@@ -237,7 +246,7 @@ DEFAULT DATE RULE:
 If no date or period is specified:
 - For Bill / Invoice / vendor / customer queries: default to past 3 completed months
   start_date = first day of month 3 months ago
-  end_date = today ({TODAY_ISO})
+  end_date = today ({today_iso})
 - For balance sheet: use today
 - For P&L summary / quarterly: use last completed month
   start_date = first day of last month
@@ -255,9 +264,13 @@ Respond ONLY with valid JSON. No markdown, no backticks.
 
 # ─── Step 1: Forecast/Trend Planner ──────────────────────────────────
 
-FORECAST_SYSTEM = f"""You are a QuickBooks query generator for a Bitcoin mining company.
+def _build_forecast_system() -> str:
+    """Build forecast planner prompt with fresh date on every call."""
+    today = _today()
+    today_iso = _today_iso()
+    return f"""You are a QuickBooks query generator for a Bitcoin mining company.
 
-Today is {TODAY}. Today's date in ISO format: {TODAY_ISO}.
+Today is {today}. Today's date in ISO format: {today_iso}.
 
 {QB_SCHEMA}
 
@@ -267,7 +280,7 @@ across multiple months. Never use SQL queries for trend/forecast questions.
 Generate a plan that fetches ProfitAndLoss for each relevant month separately.
 This gives the analyst a proper time series to work with.
 
-DYNAMIC DATE CALCULATION — always calculate from today ({TODAY_ISO}):
+DYNAMIC DATE CALCULATION — always calculate from today ({today_iso}):
 - "past 3 months" = the 3 most recently COMPLETED calendar months before today
 - "past 6 months" = the 6 most recently COMPLETED calendar months before today
 - "forecast this month" = past 3 completed months
@@ -345,29 +358,6 @@ def _detect_entity(question: str) -> dict:
         return {"type": None, "term": None}
 
 
-def _enrich_question_with_resolved_name(question: str, original_term: str, resolved_names: list[str]) -> str:
-    """
-    Rewrite the question replacing the user's fuzzy term with the exact QB name(s).
-    This ensures the planner generates correct SQL.
-    """
-    if not resolved_names:
-        return question
-    if len(resolved_names) == 1:
-        # Replace the user's term with the exact QB name
-        enriched = question.replace(original_term, resolved_names[0])
-        if enriched == question:
-            # Term wasn't found verbatim — append clarification
-            enriched = f"{question} [resolved entity name: {resolved_names[0]}]"
-        logger.info(f"Question enriched: '{question}' → '{enriched}'")
-        return enriched
-    else:
-        # Multiple matches — tell planner to fetch all and let analyst filter
-        names_str = ", ".join(resolved_names)
-        enriched = f"{question} [possible QB matches: {names_str}]"
-        logger.info(f"Question enriched with multiple matches: '{enriched}'")
-        return enriched
-
-
 # ─── Step 1.5: Vendor/Customer Name Resolution ───────────────────────
 
 VENDOR_MATCH_SYSTEM = """You are a fuzzy name matcher for QuickBooks vendor records.
@@ -426,13 +416,6 @@ def _fetch_all_customers() -> list[str]:
     except Exception as e:
         logger.error(f"Failed to fetch customer list: {e}")
         return []
-
-
-def refresh_entity_cache():
-    """Force a refresh of the vendor/customer cache. Call after adding new vendors/customers in QB."""
-    global _entity_cache
-    _entity_cache = {"vendors": [], "customers": [], "context": "", "loaded": False}
-    logger.info("Entity cache cleared — will refresh on next query.")
 
 
 def _resolve_vendor_name(user_term: str, vendor_list: list[str]) -> list[str] | None:
@@ -619,7 +602,7 @@ def _build_entity_context() -> str:
 
 def _plan_calls(question: str, intent: str) -> dict:
     """Generate QB API call plan based on classified intent."""
-    system = FORECAST_SYSTEM if intent == "FORECAST_TREND" else RETRIEVAL_SYSTEM
+    system = _build_forecast_system() if intent == "FORECAST_TREND" else _build_retrieval_system()
 
     # Inject real entity names so planner can match user input to exact QB names
     entity_context = _build_entity_context()
@@ -687,11 +670,12 @@ def interpret_and_fetch(user_question: str) -> dict:
     # Step 0.5 — Detect and resolve entity name
     # Even though the planner has entity context, we resolve separately so the
     # analyst always receives the matched QB name(s) explicitly.
+    # Always use cache — never call QB directly per query.
     resolved_vendors = []
     resolved_customers = []
     entity = _detect_entity(user_question)
     if entity.get("type") == "vendor" and entity.get("term"):
-        vendor_list = _fetch_all_vendors()
+        vendor_list = _entity_cache.get("vendors") or _fetch_all_vendors()
         matches = _resolve_vendor_name(entity["term"], vendor_list)
         if matches:
             resolved_vendors = matches
@@ -699,7 +683,7 @@ def interpret_and_fetch(user_question: str) -> dict:
         else:
             logger.info(f"No vendor match for '{entity['term']}' — analyst will scan all results")
     elif entity.get("type") == "customer" and entity.get("term"):
-        customer_list = _fetch_all_customers()
+        customer_list = _entity_cache.get("customers") or _fetch_all_customers()
         matches = _resolve_customer_name(entity["term"], customer_list)
         if matches:
             resolved_customers = matches

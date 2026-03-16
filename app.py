@@ -3,7 +3,7 @@ QB Slack Agent — Main entry point.
 Slack Bolt app using Socket Mode + Flask HTTP API for agent-to-agent calls.
 
 Entry points:
-  Slash commands: /bills /invoices /vendors /summary /balance /pnl /finance
+  Slash commands: /nb-bills /nb-invoices /nb-vendors /nb-summary /nb-balance /nb-pnl /nb-finance
   @mention / DM:  natural language via #ask-finance or direct message
   HTTP API:       POST /query (agent-to-agent, X-API-Key required)
 
@@ -117,25 +117,50 @@ def process_and_reply(client, channel: str, thread_ts: str | None, user_message:
             pass
 
 
-def process_slash(ack, respond, natural_language_query: str):
+def _slash_worker(respond, natural_language_query: str):
     """
-    Shared handler for all slash commands.
-    Acks immediately, runs pipeline, responds in-channel.
+    Runs the full pipeline in a background thread.
+    Uses a single respond() call — Slack slash commands show nothing until
+    respond() is called, so we respond once with the final result.
+    The ack() in the handler prevents the 3-second timeout.
     """
-    ack()
     try:
-        respond("⏳ Looking into that, give me a moment...")
         logger.info(f"Slash command query: '{natural_language_query}'")
         blocks, intent = _run_pipeline(natural_language_query)
-        respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
+        respond(blocks=blocks, text=f"Finance report: {intent}")
     except Exception as e:
         logger.error(f"Slash command error: {e}")
-        respond("Something went wrong. Please try again.", replace_original=True)
+        respond(text="Something went wrong. Please try again.")
+
+
+def process_slash(respond, natural_language_query: str):
+    """
+    Dispatch slash command pipeline to background thread.
+    Caller must ack() before calling this.
+    """
+    threading.Thread(
+        target=_slash_worker,
+        args=(respond, natural_language_query),
+        daemon=True,
+    ).start()
+
+
+def _ensure_cache_loaded():
+    """Load entity cache synchronously if not yet loaded. Handles startup race condition."""
+    from qb_interpreter import _entity_cache, warm_cache
+    if not _entity_cache.get("loaded") or not _entity_cache.get("vendors"):
+        logger.info("Entity cache empty at query time — loading synchronously...")
+        warm_cache()
 
 
 def _get_vendor_matches(term: str) -> list[str]:
-    """Return vendor names matching the search term from the cache."""
+    """
+    Return vendor names matching the search term from the cache.
+    Ensures cache is loaded before matching.
+    Delegates to Haiku for fuzzy matching — handles shorthand, typos, abbreviations.
+    """
     from qb_interpreter import _entity_cache, _resolve_vendor_name
+    _ensure_cache_loaded()
     vendors = _entity_cache.get("vendors", [])
     if not vendors or not term:
         return []
@@ -144,8 +169,12 @@ def _get_vendor_matches(term: str) -> list[str]:
 
 
 def _get_customer_matches(term: str) -> list[str]:
-    """Return customer names matching the search term from the cache."""
+    """
+    Return customer names matching the search term from the cache.
+    Ensures cache is loaded before matching.
+    """
     from qb_interpreter import _entity_cache, _resolve_customer_name
+    _ensure_cache_loaded()
     customers = _entity_cache.get("customers", [])
     if not customers or not term:
         return []
@@ -153,17 +182,19 @@ def _get_customer_matches(term: str) -> list[str]:
     return matches or []
 
 
-def _clarification_blocks(term: str, matches: list[str], pending_query_template: str) -> list:
+def _clarification_blocks(term: str, matches: list[str], pending_query_template: str, entity_type: str = "vendor") -> list:
     """
     Build Slack Block Kit clarification message with buttons.
+    entity_type: "vendor" or "customer" — used in the question text.
     pending_query_template has {name} placeholder replaced per button.
     """
+    label = "vendors" if entity_type == "vendor" else "customers"
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f'🔍 Found {len(matches)} vendors matching *"{term}"* — which one did you mean?'
+                "text": f'🔍 Found {len(matches)} {label} matching *"{term}"* — which one did you mean?'
             }
         },
         {"type": "actions", "elements": []}
@@ -173,14 +204,14 @@ def _clarification_blocks(term: str, matches: list[str], pending_query_template:
             "type": "button",
             "text": {"type": "plain_text", "text": name},
             "value": pending_query_template.replace("{name}", name),
-            "action_id": f"clarify_vendor_{name[:20].replace(' ', '_')}",
+            "action_id": f"clarify_{entity_type}_{name[:20].replace(' ', '_')}",
         })
     return blocks
 
 
 # ─── Slash Command Handlers ───────────────────────────────────────────────
 
-@slack_app.command("/bills")
+@slack_app.command("/nb-bills")
 def handle_bills(ack, respond, command):
     """
     /bills [vendor or all] [period]
@@ -196,7 +227,7 @@ def handle_bills(ack, respond, command):
 
     if not text:
         query = "show me all bills for all vendors past 3 months"
-        process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+        process_slash(respond=respond, natural_language_query=query)
         return
 
     # Check if this is a specific vendor query and needs clarification
@@ -234,10 +265,10 @@ def handle_bills(ack, respond, command):
             text = f"{matches[0]} {text[len(vendor_term):].strip()}"
 
     query = f"show me all bills for {text}" if text else "show me all bills past 3 months"
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+    process_slash(respond=respond, natural_language_query=query)
 
 
-@slack_app.command("/invoices")
+@slack_app.command("/nb-invoices")
 def handle_invoices(ack, respond, command):
     """
     /invoices [customer or all] [period]
@@ -252,7 +283,7 @@ def handle_invoices(ack, respond, command):
 
     if not text:
         query = "show me all invoices for all customers past 3 months"
-        process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+        process_slash(respond=respond, natural_language_query=query)
         return
 
     lower = text.lower()
@@ -279,16 +310,16 @@ def handle_invoices(ack, respond, command):
             elif len(matches) > 1:
                 period = text[len(customer_term):].strip() or "past 3 months"
                 template = f"show me all invoices for {{name}} {period}"
-                respond(blocks=_clarification_blocks(customer_term, matches, template),
+                respond(blocks=_clarification_blocks(customer_term, matches, template, entity_type="customer"),
                         text=f"Multiple customers match '{customer_term}'")
                 return
             text = f"{matches[0]} {text[len(customer_term):].strip()}"
 
     query = f"show me all invoices for {text}" if text else "show me all invoices past 3 months"
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+    process_slash(respond=respond, natural_language_query=query)
 
 
-@slack_app.command("/vendors")
+@slack_app.command("/nb-vendors")
 def handle_vendors(ack, respond, command):
     """
     /vendors [period]
@@ -299,10 +330,10 @@ def handle_vendors(ack, respond, command):
     text = (command.get("text") or "").strip()
     period = text or "past 3 months"
     query = f"show me all vendors ranked by total billed amount {period}"
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+    process_slash(respond=respond, natural_language_query=query)
 
 
-@slack_app.command("/summary")
+@slack_app.command("/nb-summary")
 def handle_summary(ack, respond, command):
     """
     /summary [period]
@@ -313,21 +344,21 @@ def handle_summary(ack, respond, command):
     text = (command.get("text") or "").strip()
     period = text or "last month"
     query = f"give me a financial summary split by hosting mining and others for {period}"
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+    process_slash(respond=respond, natural_language_query=query)
 
 
-@slack_app.command("/balance")
+@slack_app.command("/nb-balance")
 def handle_balance(ack, respond, command):
     """
     /balance
     Balance sheet as of today. No params.
     """
     ack()
-    process_slash(ack=lambda: None, respond=respond,
+    process_slash(respond=respond,
                   natural_language_query="show me the balance sheet as of today")
 
 
-@slack_app.command("/pnl")
+@slack_app.command("/nb-pnl")
 def handle_pnl(ack, respond, command):
     """
     /pnl [hosting | mining | others | all] [period]
@@ -359,10 +390,10 @@ def handle_pnl(ack, respond, command):
         else:
             query = f"show me the full P&L for all business lines {text} with accrual breakdown"
 
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=query)
+    process_slash(respond=respond, natural_language_query=query)
 
 
-@slack_app.command("/finance")
+@slack_app.command("/nb-finance")
 def handle_finance(ack, respond, command):
     """
     /finance [anything]
@@ -373,12 +404,12 @@ def handle_finance(ack, respond, command):
     if not text:
         respond("Ask me anything — e.g. `/finance what's our cash position` or `/finance how did we do last quarter`")
         return
-    process_slash(ack=lambda: None, respond=respond, natural_language_query=text)
+    process_slash(respond=respond, natural_language_query=text)
 
 
 # ─── Clarification Button Handler ─────────────────────────────────────────
 
-@slack_app.action(re.compile(r"clarify_vendor_.+"))
+@slack_app.action(re.compile(r"clarify_(vendor|customer)_.+"))
 def handle_clarification(ack, body, respond):
     """
     Handles button taps from clarification messages.
@@ -390,13 +421,12 @@ def handle_clarification(ack, body, respond):
         respond("Something went wrong — please try again.", replace_original=True)
         return
     logger.info(f"Clarification selected: '{query}'")
-    try:
-        respond("⏳ Got it, looking that up...", replace_original=True)
-        blocks, intent = _run_pipeline(query)
-        respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
-    except Exception as e:
-        logger.error(f"Clarification handler error: {e}")
-        respond("Something went wrong. Please try again.", replace_original=True)
+    respond("⏳ Got it, looking that up...", replace_original=True)
+    threading.Thread(
+        target=_slash_worker,
+        args=(respond, query),
+        daemon=True,
+    ).start()
 
 
 # ─── @mention + DM Handlers ───────────────────────────────────────────────

@@ -18,11 +18,13 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-TODAY = datetime.now().strftime("%B %d, %Y")
 
-ANALYST_SYSTEM = f"""You are a sharp CFO-level financial analyst for The Hashing Company (trading as NEXBASE TECHNOLOGY SDN. BHD.), a Bitcoin mining and hosting company with ~200 ASIC machines across 2 sites in Singapore.
+def _build_analyst_system() -> str:
+    """Build analyst system prompt with fresh date on every call."""
+    today = datetime.now().strftime("%B %d, %Y")
+    return f"""You are a sharp CFO-level financial analyst for The Hashing Company (trading as NEXBASE TECHNOLOGY SDN. BHD.), a Bitcoin mining and hosting company with ~200 ASIC machines across 2 sites in Singapore.
 
-Today is {TODAY}. Currency: use whatever currency appears in QB (MYR, USD, etc) — never convert or assume.
+Today is {today}. Currency: use whatever currency appears in QB (MYR, USD, etc) — never convert or assume.
 
 BUSINESS LINES — classify every account and transaction into one of three segments:
 
@@ -174,8 +176,8 @@ def analyse(interpreter_result: dict) -> dict:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            system=ANALYST_SYSTEM,
+            max_tokens=4000,
+            system=_build_analyst_system(),
             messages=[{
                 "role": "user",
                 "content": f"User question: {question}\n\nQuery intent: {intent}{entity_context}\n\nQuickBooks data:\n{data_context}"
@@ -237,8 +239,8 @@ def _build_data_context(results: list) -> str:
             entity_name = list(entity_data.keys())[0] if entity_data else "unknown"
             items = entity_data.get(entity_name, [])
 
-            parts.append(f"[Call {i+1}: Query — {entity_name}, {total_count} total, returning {len(items[:50])}]")
-            raw = json.dumps({entity_name: items[:50]}, indent=2)
+            parts.append(f"[Call {i+1}: Query — {entity_name}, {total_count} total, returning {len(items[:100])}]")
+            raw = json.dumps({entity_name: items[:100]}, indent=2)
             if len(raw) > PER_CALL_BUDGET:
                 raw = raw[:PER_CALL_BUDGET] + "\n... [truncated]"
             parts.append(raw)
