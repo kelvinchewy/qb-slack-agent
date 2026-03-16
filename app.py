@@ -654,6 +654,7 @@ def _startup_tasks():
 
 
 if __name__ == "__main__":
+    import sys
     logger.info("⚡ QB Slack Agent is starting...")
 
     port = int(os.environ.get("PORT", 3000))
@@ -666,5 +667,27 @@ if __name__ == "__main__":
     # Run startup tasks in background (token check + cache warm)
     threading.Thread(target=_startup_tasks, daemon=True).start()
 
-    handler = SocketModeHandler(slack_app, Config.SLACK_APP_TOKEN)
-    handler.start()
+    # Brief pause — Railway's network stack (DNS, routing) takes a few seconds
+    # to fully initialise after container start. Without this, auth.test times out.
+    time.sleep(8)
+
+    # Retry loop: if auth.test fails on first attempt (transient Railway network blip),
+    # wait and retry rather than crashing and triggering a Railway restart loop.
+    MAX_SOCKET_ATTEMPTS = 5
+    for attempt in range(1, MAX_SOCKET_ATTEMPTS + 1):
+        try:
+            logger.info(f"Connecting to Slack Socket Mode (attempt {attempt}/{MAX_SOCKET_ATTEMPTS})...")
+            handler = SocketModeHandler(slack_app, Config.SLACK_APP_TOKEN)
+            handler.start()  # blocks until disconnected; Bolt handles reconnects internally
+            break
+        except KeyboardInterrupt:
+            logger.info("Shutting down.")
+            sys.exit(0)
+        except Exception as e:
+            if attempt < MAX_SOCKET_ATTEMPTS:
+                wait = min(15 * attempt, 60)
+                logger.error(f"Socket Mode connection failed (attempt {attempt}): {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                logger.error(f"Socket Mode failed after {MAX_SOCKET_ATTEMPTS} attempts. Exiting.")
+                sys.exit(1)
