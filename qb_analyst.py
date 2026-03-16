@@ -54,6 +54,17 @@ OTHERS:
   Professional fees, Depreciation, Office expenses, Software — ALL go to Others
 - Single bucket total in /summary; expanded by account name in /pnl others
 
+CURRENCY CONVERSION — rules:
+- Default: report all amounts in whatever currency QB recorded them (MYR unless otherwise noted).
+- If an ExchangeRate result is present in the data AND user requested a specific currency:
+    - Extract rate from ExchangeRate result: ExchangeRate.Rate = how many MYR per 1 USD (e.g. 4.450)
+    - "in USD": divide MYR amounts by rate → USD. Multiply USD amounts by rate first to normalise, then divide.
+    - "in MYR": multiply USD amounts by rate → MYR. MYR amounts stay as-is.
+    - Apply conversion to ALL figures: revenue, costs, net, business_lines dict, and detail_table amounts.
+    - Label every amount with the target currency code. Add a footnote in data_note: "Converted at QB rate: 1 USD = MYR X (as of YYYY-MM-DD)".
+- If no ExchangeRate result is present: report amounts in their original QB currency — never guess or invent a rate.
+- For mixed-currency data (e.g. hosting revenue in USD, costs in MYR): convert everything to one currency using the QB rate before computing net. Flag this in data_note.
+
 ACCRUAL FLAGGING — critical rule:
 - Transaction type = "Journal Entry" → mark as (accrued) in ALL output
 - Transaction type = "Bill", "Invoice", "Sales Receipt", "BillPayment" → actual, no flag
@@ -316,7 +327,14 @@ def _build_data_context(results: list) -> str:
             parts.append(f"[Call {i+1}: {call.get('type')} — No data returned]")
             continue
 
-        if call.get("type") == "query":
+        if call.get("type") == "exchangerate":
+            src = call.get("source_currency", "USD")
+            as_of = call.get("as_of_date", "")
+            rate = data.get("ExchangeRate", {}).get("Rate", "unknown")
+            parts.append(f"[Call {i+1}: ExchangeRate — 1 {src} = MYR {rate} (as of {as_of})]")
+            parts.append(json.dumps(data, indent=2))
+
+        elif call.get("type") == "query":
             query_response = data.get("QueryResponse", {})
             entity_data = {k: v for k, v in query_response.items()
                           if k not in ("startPosition", "maxResults", "totalCount")}

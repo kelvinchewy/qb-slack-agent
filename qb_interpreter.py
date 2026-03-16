@@ -68,6 +68,10 @@ Do NOT chain if the question only asks for totals/summary (no vendor detail requ
 - ProfitAndLoss — params: start_date, end_date (YYYY-MM-DD)
   → Returns expense category totals: Utilities, Rent, Salaries, COGS etc.
   → ONLY way to get expense category data
+- ExchangeRate — params: source_currency (e.g. "USD"), as_of_date (YYYY-MM-DD)
+  → Returns QB's recorded exchange rate between source_currency and home currency (MYR)
+  → Use the period end date as as_of_date
+  → Only include when user explicitly requests a specific output currency ("in USD", "in MYR")
 - BalanceSheet — params: date (YYYY-MM-DD)
 - AgedReceivables — no params required
 - AgedPayables — no params required
@@ -169,7 +173,18 @@ DECISION RULES:
 15. BillPayment / "payments made to" / "when did we pay" / "payment history" →
     SELECT * FROM BillPayment WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
     BillPayment records actual payment transactions (cheques, bank transfers) against bills.
-16. ANY query with monthly breakdown / "breakdown by month" / "month by month" / "monthly" across a multi-month range →
+16. Currency conversion requested — user says "in USD", "in MYR", "convert to USD", "show in USD" etc. →
+    Add ONE ExchangeRate call to the plan alongside the data calls.
+    - source_currency: the FROM currency (e.g. "USD" if user wants MYR→USD, "USD" if user wants USD→MYR)
+    - For hosting queries involving Northstar (USD invoices): source_currency = "USD"
+    - For mining/MYR queries where user wants USD: source_currency = "USD"
+    - as_of_date: last day of the queried period (or today for balance sheet queries)
+    - Default (no currency mentioned) → do NOT add ExchangeRate call; report as-is from QB
+    Example — "show hosting P&L Jan 2026 in USD":
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}}
+      {{"type": "exchangerate", "source_currency": "USD", "as_of_date": "2026-01-31"}}
+
+17. ANY query with monthly breakdown / "breakdown by month" / "month by month" / "monthly" across a multi-month range →
     Generate ONE call per calendar month in the range, using the same call type as you would for a single period.
     Do NOT make a single call for the full range — the analyst needs one result per month to build per-month rows.
     Always use the last calendar day of each month as end_date:
@@ -221,6 +236,8 @@ Examples:
 - "all transactions over MYR 50000 this month" → Bill query with TotalAmt > 50000
 - "new vendors this quarter" → Bill query this quarter + Bill query last quarter (two calls)
 - "when did we last pay Northstar" → BillPayment query for last 6 months
+- "hosting P&L Jan 2026 in USD" → ProfitAndLoss call + ExchangeRate call (USD, 2026-01-31)
+- "show mining P&L in USD" → ProfitAndLoss call + ExchangeRate call (USD, last day of period)
 - "mining P&L Oct to Feb breakdown by month" → 5 separate ProfitAndLoss calls, one per month
 - "show monthly P&L last quarter" → 3 separate ProfitAndLoss calls, one per month in the quarter
 - "S And E bills month by month last quarter" → 3 separate Bill queries, one per month
@@ -593,6 +610,9 @@ def _execute_calls(plan: dict) -> list:
                 return idx, {"call": call, "data": data, "error": None}
             elif call["type"] == "query":
                 data = qb_agent.query(call["sql"])
+                return idx, {"call": call, "data": data, "error": None}
+            elif call["type"] == "exchangerate":
+                data = qb_agent.get_exchange_rate(call["source_currency"], call["as_of_date"])
                 return idx, {"call": call, "data": data, "error": None}
             else:
                 return idx, {"call": call, "data": None, "error": f"Unknown call type: {call['type']}"}

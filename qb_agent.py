@@ -337,6 +337,36 @@ def query(sql: str) -> dict:
     return _client.query(sql)
 
 
+def get_exchange_rate(source_currency: str, as_of_date: str) -> dict:
+    """
+    Fetch QB's recorded exchange rate between source_currency and the company
+    home currency (MYR) as of a specific date.
+
+    Returns the raw QB ExchangeRate response, e.g.:
+      {"ExchangeRate": {"SourceCurrencyCode": "USD", "Rate": 4.45, ...}}
+    """
+    url = f"{_client.base_url}/v3/company/{_client.company_id}/exchangerate"
+    params = {
+        "sourcecurrencycode": source_currency,
+        "asofdate": as_of_date,
+        "minorversion": "65",
+    }
+    try:
+        response = httpx.get(url, headers=_client._headers(), params=params, timeout=15)
+        if response.status_code == 401:
+            logger.warning("401 on exchangerate — refreshing token and retrying...")
+            _token_manager.force_refresh()
+            response = httpx.get(url, headers=_client._headers(), params=params, timeout=15)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"QB ExchangeRate error {e.response.status_code}: {e.response.text}")
+        raise Exception(f"QB ExchangeRate API error {e.response.status_code}: {e.response.text}")
+    except httpx.TimeoutException:
+        logger.error("QB ExchangeRate API timed out")
+        raise Exception("QuickBooks exchange rate API timed out. Please try again.")
+
+
 # ─── Report Helpers ───────────────────────────────────────────────────
 
 def _find_row(rows: list, row_name: str) -> float:
