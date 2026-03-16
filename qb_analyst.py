@@ -157,7 +157,6 @@ def analyse(interpreter_result: dict) -> dict:
         }
     """
     question = interpreter_result.get("question", "")
-    intent = interpreter_result.get("intent", "RETRIEVAL")
     query_complexity = interpreter_result.get("query_complexity", "simple")
     results = interpreter_result.get("results", [])
     fetch_error = interpreter_result.get("error")
@@ -199,7 +198,7 @@ def analyse(interpreter_result: dict) -> dict:
             system=_build_analyst_system(),
             messages=[{
                 "role": "user",
-                "content": f"User question: {question}\n\nQuery intent: {intent}{entity_context}\n\nQuickBooks data:\n{data_context}"
+                "content": f"User question: {question}{entity_context}\n\nQuickBooks data:\n{data_context}"
             }],
         )
 
@@ -232,8 +231,8 @@ def _build_data_context(results: list) -> str:
     Convert raw QB API results into a readable context string for Claude.
     Reports get a larger budget than queries — balance sheets can be large.
     """
-    QUERY_BUDGET = 6000   # Bills/invoices — individual records
-    REPORT_BUDGET = 20000 # P&L, Balance Sheet — full report JSON needed
+    QUERY_BUDGET = 6000    # Bills/invoices — individual records
+    REPORT_BUDGET = 40000  # Reports (balance sheet, P&L) — needs full JSON
     parts = []
 
     for i, result in enumerate(results):

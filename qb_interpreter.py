@@ -1,7 +1,6 @@
 """
 qb_interpreter.py — Natural language → QuickBooks query execution.
 
-Step 0: Classify intent as RETRIEVAL or FORECAST_TREND
 Step 1: Generate QB API call plan based on classification
 Step 2: Execute calls and return structured results
 
@@ -28,53 +27,11 @@ def _today_iso() -> str:
     """Current date as ISO string. Called fresh on every use."""
     return datetime.now().strftime("%Y-%m-%d")
 
-# ─── Step 0: Classifier ───────────────────────────────────────────────
-
-CLASSIFIER_SYSTEM = """You are a query classifier for a QuickBooks finance agent.
-
-Classify the user's question into exactly one of:
-- RETRIEVAL: looking up specific records, a point-in-time report, or a vendor/customer query
-- FORECAST_TREND: asking about trends over time, historical patterns, forecasting future expenses
-
-RETRIEVAL examples:
-- "balance sheet"
-- "who owes us money"
-- "bills from PowerGrid"
-- "what's our cash position"
-- "show me unpaid invoices"
-- "utility expenses for a specific month"
-
-FORECAST_TREND examples:
-- "forecast my spending this month"
-- "top expenses last month using 3 months data"
-- "utility expenses for the past 6 months"
-- "how has our electricity cost changed"
-- "cashflow next 30 days"
-- "are our costs going up"
-- ANY question asking for history across multiple months
-- ANY question asking to forecast or project
-
-Respond with ONLY one word: RETRIEVAL or FORECAST_TREND
-"""
+# ─── Step 0: Intent (all queries are RETRIEVAL) ──────────────────────
 
 def _classify_intent(question: str) -> str:
-    """Returns 'RETRIEVAL' or 'FORECAST_TREND'"""
-    try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=10,
-            system=CLASSIFIER_SYSTEM,
-            messages=[{"role": "user", "content": question}],
-        )
-        result = response.content[0].text.strip().upper()
-        if result not in ("RETRIEVAL", "FORECAST_TREND"):
-            result = "RETRIEVAL"
-        logger.info(f"Intent classified as: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Classifier error: {e}")
-        return "RETRIEVAL"
+    """All queries route to RETRIEVAL pipeline. Forecast removed from scope."""
+    return "RETRIEVAL"
 
 
 # ─── QB Schema Knowledge ──────────────────────────────────────────────
@@ -251,6 +208,7 @@ If no date or period is specified:
 - For P&L summary / quarterly: use last completed month
   start_date = first day of last month
   end_date = last day of last month
+{{
   "calls": [
     {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}},
     {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-02-01' AND TxnDate <= '2026-02-28' ORDERBY TxnDate DESC MAXRESULTS 100"}}
@@ -261,55 +219,6 @@ If no date or period is specified:
 
 Respond ONLY with valid JSON. No markdown, no backticks.
 """
-
-# ─── Step 1: Forecast/Trend Planner ──────────────────────────────────
-
-def _build_forecast_system() -> str:
-    """Build forecast planner prompt with fresh date on every call."""
-    today = _today()
-    today_iso = _today_iso()
-    return f"""You are a QuickBooks query generator for a Bitcoin mining company.
-
-Today is {today}. Today's date in ISO format: {today_iso}.
-
-{QB_SCHEMA}
-
-The user wants trend analysis or forecasting. This ALWAYS requires ProfitAndLoss reports
-across multiple months. Never use SQL queries for trend/forecast questions.
-
-Generate a plan that fetches ProfitAndLoss for each relevant month separately.
-This gives the analyst a proper time series to work with.
-
-DYNAMIC DATE CALCULATION — always calculate from today ({today_iso}):
-- "past 3 months" = the 3 most recently COMPLETED calendar months before today
-- "past 6 months" = the 6 most recently COMPLETED calendar months before today
-- "forecast this month" = past 3 completed months
-- "cashflow next 30 days" = past 3 completed months + AgedPayables
-- Never include the current partial month as a completed month
-
-To calculate: take today's month, go back N months, use exact first/last day of each month.
-Example if today is March 10 2026:
-  Past 3 months = Feb 2026 (2026-02-01 to 2026-02-28), Jan 2026 (2026-01-01 to 2026-01-31), Dec 2025 (2025-12-01 to 2025-12-31)
-  Past 6 months = Feb, Jan, Dec, Nov, Oct, Sep
-
-Always use exact calendar month boundaries. February ends on 28 (non-leap) or 29 (leap year).
-
-Output format:
-{{
-  "call_type": "multi",
-  "calls": [
-    {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}},
-    {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}},
-    {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-12-01", "end_date": "2025-12-31"}}}}
-  ],
-  "query_complexity": "detail",
-  "intent": "forecast_trend",
-  "reasoning": "brief note"
-}}
-
-Respond ONLY with valid JSON. No markdown, no backticks.
-"""
-
 
 # ─── Step 0.5: Entity Detection + Name Resolution ────────────────────
 
@@ -600,9 +509,9 @@ def _build_entity_context() -> str:
     return _entity_cache.get("context", "")
 
 
-def _plan_calls(question: str, intent: str) -> dict:
-    """Generate QB API call plan based on classified intent."""
-    system = _build_forecast_system() if intent == "FORECAST_TREND" else _build_retrieval_system()
+def _plan_calls(question: str) -> dict:
+    """Generate QB API call plan."""
+    system = _build_retrieval_system()
 
     # Inject real entity names so planner can match user input to exact QB names
     entity_context = _build_entity_context()
@@ -656,8 +565,7 @@ def interpret_and_fetch(user_question: str) -> dict:
     """
     Main entry point.
 
-    Step 0:   Classify intent (RETRIEVAL vs FORECAST_TREND)
-    Step 0.5: Detect + resolve any vendor/customer name mentioned in the question
+        Step 0.5: Detect + resolve any vendor/customer name mentioned in the question
     Step 1:   Plan QB API calls (entity context injected so planner uses exact QB names)
     Step 2:   Execute calls
     Returns structured result for qb_analyst.
@@ -675,7 +583,7 @@ def interpret_and_fetch(user_question: str) -> dict:
     resolved_customers = []
     entity = _detect_entity(user_question)
     if entity.get("type") == "vendor" and entity.get("term"):
-        if not _entity_cache.get("vendors"):
+        if not _cache_is_fresh():
             warm_cache()
         vendor_list = _entity_cache.get("vendors", [])
         matches = _resolve_vendor_name(entity["term"], vendor_list)
@@ -685,7 +593,7 @@ def interpret_and_fetch(user_question: str) -> dict:
         else:
             logger.info(f"No vendor match for '{entity['term']}' — analyst will scan all results")
     elif entity.get("type") == "customer" and entity.get("term"):
-        if not _entity_cache.get("customers"):
+        if not _cache_is_fresh():
             warm_cache()
         customer_list = _entity_cache.get("customers", [])
         matches = _resolve_customer_name(entity["term"], customer_list)
@@ -696,7 +604,7 @@ def interpret_and_fetch(user_question: str) -> dict:
             logger.info(f"No customer match for '{entity['term']}' — analyst will scan all results")
 
     # Step 1 — Plan (entity context injected inside _plan_calls)
-    plan = _plan_calls(user_question, intent)
+    plan = _plan_calls(user_question)
     if "error" in plan and not plan.get("calls"):
         return {
             "question": user_question,
