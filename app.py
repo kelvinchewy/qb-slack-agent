@@ -667,12 +667,10 @@ if __name__ == "__main__":
     # Run startup tasks in background (token check + cache warm)
     threading.Thread(target=_startup_tasks, daemon=True).start()
 
-    # Brief pause — Railway's network stack (DNS, routing) takes a few seconds
-    # to fully initialise after container start. Without this, auth.test times out.
-    time.sleep(8)
-
-    # Retry loop: if auth.test fails on first attempt (transient Railway network blip),
-    # wait and retry rather than crashing and triggering a Railway restart loop.
+    # Retry loop: if auth.test times out on first attempt (Railway network not yet
+    # fully ready), wait and retry rather than crashing into a Railway restart loop.
+    # First attempt is immediate — no artificial sleep — to minimise the dark window
+    # between container start and Slack connection being established.
     MAX_SOCKET_ATTEMPTS = 5
     for attempt in range(1, MAX_SOCKET_ATTEMPTS + 1):
         try:
