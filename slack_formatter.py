@@ -224,8 +224,11 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
         hdrs = detail_table.get("headers", [])
         rows = detail_table.get("rows", [])
         if hdrs and rows:
-            # Filter rows to only the requested business line
-            if not show_all:
+            # Filter rows to only the requested business line.
+            # Skip filtering for month-by-month tables — rows are months, not account names,
+            # and the analyst has already scoped them to the requested line.
+            is_monthly_table = hdrs and str(hdrs[0]).lower() == "month"
+            if not show_all and not is_monthly_table:
                 requested = []
                 if show_hosting:
                     requested.append("hosting")
