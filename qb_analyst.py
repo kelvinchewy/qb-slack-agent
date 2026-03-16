@@ -28,19 +28,31 @@ Today is {today}. Currency: use whatever currency appears in QB (MYR, USD, etc) 
 
 BUSINESS LINES — classify every account and transaction into one of three segments:
 
-HOSTING (AA):
-- Revenue: Invoices issued to NORTHSTAR MANAGEMENT (HK) LIMITED
-- Costs: Any QB account containing "- AA" or with "AA" suffix (e.g. "Utility - AA")
-- Monthly Journal Entries for estimated electricity = accrued hosting costs
+MINING:
+- Revenue: ONLY "Revenue:Realised" and "Revenue:Un-Realised" — nothing else
+- Costs: ONLY these two buckets:
+    1. Any account containing "- Nexbase" or "Nexbase" suffix (e.g. "Utility - Nexbase")
+    2. "Rent or lease"
+- EXCLUDE from Mining entirely (move to Others):
+    - "Un-realised fair value losses" or any fair value / revaluation accounts
+    - Amortisation expense
+    - Management fees
+    - Interest expense
+    - Other expenses
+    - Any account not explicitly listed above
+- If an account name is not Revenue:Realised, Revenue:Un-Realised, Utility-Nexbase, or Rent or lease — it does NOT belong in Mining
 
-MINING (Nexbase):
-- Revenue: Revenue:Realised (actual BTC sales via LUNO), Revenue:Un-Realised (monthly BTC mark-to-market Journal Entries)
-- Costs: Any QB account containing "- Nexbase" or with "Nexbase" suffix (e.g. "Utility - Nexbase")
-- Monthly Journal Entries for estimated electricity = accrued mining costs
+HOSTING:
+- Revenue: Invoices issued to NORTHSTAR MANAGEMENT (HK) LIMITED
+- Costs: ONLY accounts containing "- AA" or "AA" suffix (e.g. "Utility - AA")
 
 OTHERS:
-- Everything that doesn't match Hosting or Mining patterns above
-- Single bucket in /summary, expanded by account category in /pnl others
+- Revenue: Any revenue account NOT in Mining revenue and NOT Northstar invoices (future revenue streams — may be zero)
+- Costs: Everything not classified as Mining or Hosting costs above
+  Examples: Amortisation expense, Supplies and Materials, Maintenance fees, Commissions and fees,
+  Internet, Subscriptions, Bank charges, Freight and delivery, Exchange Gain or Loss,
+  Professional fees, Depreciation, Office expenses, Software — ALL go to Others
+- Single bucket total in /summary; expanded by account name in /pnl others
 
 ACCRUAL FLAGGING — critical rule:
 - Transaction type = "Journal Entry" → mark as (accrued) in ALL output
@@ -64,7 +76,7 @@ Respond with this JSON:
   "proactive_flags": ["Only real actionable issues. Empty [] if none."],
   "summary_line": "Under 80 chars. The one thing a CFO needs to know.",
   "has_detail_table": true,
-  "report_type": "standard | pnl_by_line | pnl_monthly | summary_grid | vendor_list | invoice_list",
+  "report_type": "standard | pnl_by_line | summary_grid | vendor_list | invoice_list",
   "detail_table": {{
     "headers": ["Account", "Amount", "Type"],
     "rows": [["Utility - AA electricity", "MYR 79", "actual"],
@@ -96,17 +108,6 @@ For TOP VENDORS / VENDOR RANKINGS:
 - Group all Bill results by VendorRef.name, sum TotalAmt per vendor
 - Detail table: Rank, Vendor, Total Billed, # Bills, % of Total
 - Sort descending by total billed
-
-For MONTHLY P&L BREAKDOWN (multiple P&L periods requested):
-- Detect: 2+ ProfitAndLoss reports in results, each covering a different month
-- report_type = "pnl_monthly"
-- detail_table headers: ["Month", "Revenue", "Costs", "Net", "Net Margin %"]
-- Each row: one month (derive month name from the report's date range, e.g. "Dec 2025")
-- Add a "Total" summary row at the bottom
-- Populate business_lines with TOTALS across all months, scoped to the requested line
-- direct_answer: 2 sentences comparing month-over-month trend; name the best and worst month
-- If user asked for a specific business line (e.g. "mining"), classify each month's revenue/costs
-  by that line's rules — do not aggregate all lines into the monthly row figures
 
 For P&L BY BUSINESS LINE (/pnl):
 - Use ProfitAndLoss report data, classify each account by business line rules above
@@ -205,7 +206,7 @@ def analyse(interpreter_result: dict) -> dict:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=8000,
+            max_tokens=4000,
             system=_build_analyst_system(),
             messages=[{
                 "role": "user",
@@ -224,7 +225,6 @@ def analyse(interpreter_result: dict) -> dict:
         # Ensure new fields have defaults if analyst didn't populate them
         analysis.setdefault("report_type", "standard")
         analysis.setdefault("business_lines", None)
-        analysis.setdefault("currency", "MYR")
 
         logger.info(f"Analysis complete. Type: {analysis.get('report_type')} | Complexity: {query_complexity} | Flags: {len(analysis.get('proactive_flags', []))}")
         return analysis
