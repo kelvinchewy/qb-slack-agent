@@ -64,7 +64,7 @@ Respond with this JSON:
   "proactive_flags": ["Only real actionable issues. Empty [] if none."],
   "summary_line": "Under 80 chars. The one thing a CFO needs to know.",
   "has_detail_table": true,
-  "report_type": "standard | pnl_by_line | summary_grid | vendor_list | invoice_list",
+  "report_type": "standard | pnl_by_line | pnl_monthly | summary_grid | vendor_list | invoice_list",
   "detail_table": {{
     "headers": ["Account", "Amount", "Type"],
     "rows": [["Utility - AA electricity", "MYR 79", "actual"],
@@ -96,6 +96,17 @@ For TOP VENDORS / VENDOR RANKINGS:
 - Group all Bill results by VendorRef.name, sum TotalAmt per vendor
 - Detail table: Rank, Vendor, Total Billed, # Bills, % of Total
 - Sort descending by total billed
+
+For MONTHLY P&L BREAKDOWN (multiple P&L periods requested):
+- Detect: 2+ ProfitAndLoss reports in results, each covering a different month
+- report_type = "pnl_monthly"
+- detail_table headers: ["Month", "Revenue", "Costs", "Net", "Net Margin %"]
+- Each row: one month (derive month name from the report's date range, e.g. "Dec 2025")
+- Add a "Total" summary row at the bottom
+- Populate business_lines with TOTALS across all months, scoped to the requested line
+- direct_answer: 2 sentences comparing month-over-month trend; name the best and worst month
+- If user asked for a specific business line (e.g. "mining"), classify each month's revenue/costs
+  by that line's rules — do not aggregate all lines into the monthly row figures
 
 For P&L BY BUSINESS LINE (/pnl):
 - Use ProfitAndLoss report data, classify each account by business line rules above

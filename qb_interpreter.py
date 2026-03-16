@@ -542,20 +542,36 @@ def _plan_calls(question: str) -> dict:
 # ─── Step 2: Execute ──────────────────────────────────────────────────
 
 def _execute_calls(plan: dict) -> list:
-    """Execute each API call in the plan and return results."""
-    results = []
-    for call in plan.get("calls", []):
+    """Execute all API calls concurrently and return results in original order."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    calls = plan.get("calls", [])
+    if not calls:
+        return []
+
+    results = [None] * len(calls)
+
+    def _execute_one(idx: int, call: dict):
         try:
             if call["type"] == "report":
                 params = {**call.get("params", {}), "minorversion": "65"}
                 data = qb_agent.get_report(call["report_name"], params)
-                results.append({"call": call, "data": data, "error": None})
+                return idx, {"call": call, "data": data, "error": None}
             elif call["type"] == "query":
                 data = qb_agent.query(call["sql"])
-                results.append({"call": call, "data": data, "error": None})
+                return idx, {"call": call, "data": data, "error": None}
+            else:
+                return idx, {"call": call, "data": None, "error": f"Unknown call type: {call['type']}"}
         except Exception as e:
             logger.error(f"QB call failed: {call} — {e}")
-            results.append({"call": call, "data": None, "error": str(e)})
+            return idx, {"call": call, "data": None, "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=min(len(calls), 5)) as executor:
+        futures = [executor.submit(_execute_one, i, call) for i, call in enumerate(calls)]
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results[idx] = result
+
     return results
 
 

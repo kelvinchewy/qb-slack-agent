@@ -46,6 +46,33 @@ def context(text: str) -> dict:
     return {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
 
 
+# ─── Shared Formatter Helpers ────────────────────────────────────────
+
+def _footer_block(data_completeness: str, data_note: str) -> dict:
+    """Build the standard footer context block used by all report formatters."""
+    parts = []
+    if data_completeness == "partial":
+        parts.append("🟡 Partial data")
+    elif data_completeness == "incomplete":
+        parts.append("🔴 Incomplete data — treat with caution")
+    if data_note:
+        parts.append(f"ℹ️ {data_note}")
+    parts.append("_QuickBooks Online · The Hashing Company_")
+    return context("  ·  ".join(parts))
+
+
+def _findings_flag_blocks(key_findings: list, proactive_flags: list) -> list[dict]:
+    """Build divider+section blocks for key findings and proactive flags."""
+    blocks = []
+    if key_findings:
+        blocks.append(divider())
+        blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
+    if proactive_flags:
+        blocks.append(divider())
+        blocks.append(section("\n".join(f"⚠️ {f}" for f in proactive_flags)))
+    return blocks
+
+
 # ─── Dynamic Analysis Formatter ──────────────────────────────────────
 
 COMPLETENESS_EMOJI = {
@@ -65,6 +92,8 @@ def format_dynamic_analysis(analysis: dict) -> list[dict]:
 
     if report_type == "pnl_by_line":
         blocks = _format_pnl_by_line(analysis)
+    elif report_type == "pnl_monthly":
+        blocks = _format_pnl_monthly(analysis)
     elif report_type == "summary_grid":
         blocks = _format_summary_grid(analysis)
     else:
@@ -110,23 +139,8 @@ def _format_standard(analysis: dict) -> list[dict]:
             blocks.append(divider())
             blocks.extend(_render_table(hdrs, rows))
 
-    if key_findings:
-        blocks.append(divider())
-        blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
-
-    if proactive_flags:
-        blocks.append(divider())
-        blocks.append(section("\n".join(f"⚠️ {f}" for f in proactive_flags)))
-
-    footer_parts = []
-    if data_completeness == "partial":
-        footer_parts.append("🟡 Partial data — some accounts may be missing")
-    elif data_completeness == "incomplete":
-        footer_parts.append("🔴 Incomplete data — treat with caution")
-    if data_note:
-        footer_parts.append(f"ℹ️ {data_note}")
-    footer_parts.append("_QuickBooks Online · The Hashing Company_")
-    blocks.append(context("  ·  ".join(footer_parts)))
+    blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
+    blocks.append(_footer_block(data_completeness, data_note))
     return blocks
 
 
@@ -242,19 +256,57 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
             key_findings = relevant if relevant else key_findings
         blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
 
-    if proactive_flags:
-        blocks.append(divider())
-        blocks.append(section("\n".join(f"⚠️ {f}" for f in proactive_flags)))
+    blocks.extend(_findings_flag_blocks([], proactive_flags))
+    blocks.append(_footer_block(data_completeness, data_note))
+    return blocks
 
-    footer_parts = []
-    if data_completeness == "partial":
-        footer_parts.append("🟡 Partial data")
-    elif data_completeness == "incomplete":
-        footer_parts.append("🔴 Incomplete data — treat with caution")
-    if data_note:
-        footer_parts.append(f"ℹ️ {data_note}")
-    footer_parts.append("_QuickBooks Online · The Hashing Company_")
-    blocks.append(context("  ·  ".join(footer_parts)))
+
+def _format_pnl_monthly(analysis: dict) -> list[dict]:
+    """
+    Monthly P&L comparison layout.
+    Renders a month-by-month table (Month | Revenue | Costs | Net | Margin)
+    followed by totals, key findings, and flags.
+    """
+    blocks = []
+    question = analysis.get("question", "")
+    direct_answer = analysis.get("direct_answer", "")
+    key_findings = analysis.get("key_findings", [])
+    proactive_flags = analysis.get("proactive_flags", [])
+    detail_table = analysis.get("detail_table")
+    data_note = analysis.get("data_note", "")
+    data_completeness = analysis.get("data_completeness", "")
+    business_lines = analysis.get("business_lines")
+    currency = analysis.get("currency", "MYR")
+
+    q_display = question[:70] + ("..." if len(question) > 70 else "")
+    badge = COMPLETENESS_EMOJI.get(data_completeness, "")
+    blocks.append(header(f"📅 {q_display}" + (f"  {badge}" if badge else "")))
+    blocks.append(divider())
+    blocks.append(section(direct_answer))
+
+    if detail_table:
+        hdrs = detail_table.get("headers", [])
+        rows = detail_table.get("rows", [])
+        if hdrs and rows:
+            blocks.append(divider())
+            blocks.extend(_render_table(hdrs, rows))
+
+    if business_lines:
+        total = business_lines.get("total")
+        if total:
+            t_rev = total.get("revenue", 0)
+            t_costs = total.get("costs", 0)
+            t_net = total.get("net", 0)
+            t_sign = "+" if t_net >= 0 else ""
+            blocks.append(divider())
+            blocks.append(section(
+                f"*━━━ PERIOD TOTAL ━━━*\n"
+                f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
+                f"Net: `{t_sign}{currency} {t_net:,.0f}`"
+            ))
+
+    blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
+    blocks.append(_footer_block(data_completeness, data_note))
     return blocks
 
 
@@ -291,23 +343,8 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
             rows.append(row)
         blocks.extend(_render_table(headers_row, rows))
 
-    if key_findings:
-        blocks.append(divider())
-        blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
-
-    if proactive_flags:
-        blocks.append(divider())
-        blocks.append(section("\n".join(f"⚠️ {f}" for f in proactive_flags)))
-
-    footer_parts = []
-    if data_completeness == "partial":
-        footer_parts.append("🟡 Partial data")
-    elif data_completeness == "incomplete":
-        footer_parts.append("🔴 Incomplete data")
-    if data_note:
-        footer_parts.append(f"ℹ️ {data_note}")
-    footer_parts.append("_QuickBooks Online · The Hashing Company_")
-    blocks.append(context("  ·  ".join(footer_parts)))
+    blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
+    blocks.append(_footer_block(data_completeness, data_note))
     return blocks
 
 

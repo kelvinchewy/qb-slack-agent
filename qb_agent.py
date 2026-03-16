@@ -49,23 +49,32 @@ class TokenManager:
     """
 
     def __init__(self):
+        import threading as _threading
         self.access_token = Config.QB_ACCESS_TOKEN
         self.refresh_token = Config.QB_REFRESH_TOKEN
         # Force refresh on first call — handles already-expired tokens on startup
         self.expires_at = 0
+        self._lock = _threading.Lock()  # prevents concurrent refresh races
 
     def get_access_token(self) -> str:
-        """Return a valid access token, refreshing if necessary."""
+        """Return a valid access token, refreshing if necessary.
+        Lock ensures only one thread refreshes at a time — other threads
+        re-check after the lock is released and skip the refresh if already done.
+        """
         if self._needs_refresh():
-            logger.info("Access token expired or near expiry — refreshing...")
-            self._refresh()
+            with self._lock:
+                # Re-check inside lock — another thread may have already refreshed
+                if self._needs_refresh():
+                    logger.info("Access token expired or near expiry — refreshing...")
+                    self._refresh()
         return self.access_token
 
     def force_refresh(self):
         """Force an immediate token refresh — called on 401 responses."""
         logger.info("401 received — forcing token refresh...")
-        self.expires_at = 0
-        self._refresh()
+        with self._lock:
+            self.expires_at = 0
+            self._refresh()
 
     def _needs_refresh(self) -> bool:
         return time.time() >= (self.expires_at - REFRESH_BUFFER_SECONDS)
