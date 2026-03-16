@@ -358,39 +358,31 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
 
 def _render_table(headers: list, rows: list) -> list[dict]:
     """
-    Renders a data table as Slack section blocks.
-    Groups rows into chunks to stay within Slack's block limits.
+    Renders a data table using Slack's native table block.
+    First column left-aligned (labels), remaining columns right-aligned (numbers).
+    Slack renders this natively with proper column alignment.
     """
-    blocks = []
-
-    # Column widths for monospace-style alignment
-    col_widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            if i < len(col_widths):
-                col_widths[i] = max(col_widths[i], len(str(cell)))
+    # Determine alignment: first col = left (labels), rest = right (numeric values)
+    col_count = len(headers)
+    column_settings = [
+        {"align": "left" if i == 0 else "right", "is_wrapped": False}
+        for i in range(col_count)
+    ]
 
     # Header row
-    header_line = "  ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
-    separator = "  ".join("-" * col_widths[i] for i in range(len(headers)))
+    table_rows = [
+        [{"type": "raw_text", "text": str(h)} for h in headers]
+    ]
 
-    # Render in chunks of 15 rows per block (Slack text limit)
-    chunk_size = 15
-    for chunk_start in range(0, len(rows), chunk_size):
-        chunk = rows[chunk_start:chunk_start + chunk_size]
-        lines = []
+    # Data rows
+    for row in rows:
+        cells = []
+        for i in range(col_count):
+            text = str(row[i]) if i < len(row) else ""
+            cells.append({"type": "raw_text", "text": text})
+        table_rows.append(cells)
 
-        if chunk_start == 0:
-            lines.append(f"`{header_line}`")
-            lines.append(f"`{separator}`")
-
-        for row in chunk:
-            row_line = "  ".join(str(row[i]).ljust(col_widths[i]) if i < len(row) else " " * col_widths[i] for i in range(len(headers)))
-            lines.append(f"`{row_line}`")
-
-        blocks.append(section("\n".join(lines)))
-
-    return blocks
+    return [{"type": "table", "column_settings": column_settings, "rows": table_rows}]
 
 
 
