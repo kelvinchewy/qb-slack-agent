@@ -224,11 +224,17 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
         hdrs = detail_table.get("headers", [])
         rows = detail_table.get("rows", [])
         if hdrs and rows:
-            # Filter rows to only the requested business line.
-            # Skip filtering for month-by-month tables — rows are months, not account names,
-            # and the analyst has already scoped them to the requested line.
+            # Row filtering rules:
+            # - Monthly tables: never filter — rows are month names, analyst already scoped them.
+            # - Combined multi-line tables (contain "mining net"/"hosting net" rows): filter to
+            #   keep only the requested section(s).
+            # - Single-line tables: never filter — all rows belong to the one requested line,
+            #   account names like "Revenue:Realised" don't contain the line keyword.
             is_monthly_table = hdrs and str(hdrs[0]).lower() == "month"
-            if not show_all and not is_monthly_table:
+            row_labels = {str(r[0]).lower() for r in rows}
+            is_combined_table = bool(row_labels & {"mining net", "hosting net", "others net"})
+
+            if not show_all and not is_monthly_table and is_combined_table:
                 requested = []
                 if show_hosting:
                     requested.append("hosting")
@@ -236,7 +242,6 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
                     requested.append("mining")
                 if show_others:
                     requested.append("others")
-                # Keep rows where first column matches requested line (case-insensitive)
                 filtered_rows = [
                     r for r in rows
                     if any(req in str(r[0]).lower() for req in requested)
