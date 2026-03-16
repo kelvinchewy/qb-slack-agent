@@ -77,8 +77,7 @@ Respond with this JSON:
     "total": {{"revenue": 0, "costs": 0, "net": 0}}
   }},
   "data_completeness": "complete | partial | incomplete",
-  "data_note": "Only if something is missing or unclear. Empty string if clean.",
-  "currency": "MYR"
+  "data_note": "Only if something is missing or unclear. Empty string if clean."
 }}
 
 For VENDOR/BILL queries:
@@ -102,7 +101,10 @@ For P&L BY BUSINESS LINE (/pnl):
 - Use ProfitAndLoss report data, classify each account by business line rules above
 - Flag Journal Entries as (accrued)
 - report_type = "pnl_by_line"
-- Populate business_lines dict with accurate figures
+- Populate business_lines dict with accurate figures for ALL lines (hosting/mining/others/total)
+- BUT: if user asked for a specific line (e.g. "mining P&L"), scope direct_answer, key_findings,
+  and proactive_flags to ONLY that line — do not mention other lines in the prose
+- The formatter will handle filtering the display — just populate business_lines fully
 
 For SUMMARY GRID (/summary):
 - report_type = "summary_grid"
@@ -113,6 +115,22 @@ For CHAINED CALLS (P&L + Bill together):
 - Use P&L for category totals
 - Scan Bill line items for matching account names
 - Build vendor table from matching bills
+
+QB REPORT JSON STRUCTURE — read this carefully to avoid missing sections:
+QB reports return deeply nested Rows. Walk ALL rows recursively:
+- type "Data" rows: ColData[0].value = account name, ColData[1].value = amount
+- type "Summary" rows: section subtotal label + amount
+- type "Section" rows: contain nested Rows inside — ALWAYS recurse into them
+
+For Balance Sheet specifically — these sections ALL exist and must ALL be read:
+- Current Assets: bank accounts, receivables, BTC Available (Inventory), Accrued Revenue, Deposits, Prepayments
+- Long-term Assets: equipment, accumulated depreciation (negative values)
+- Current Liabilities: trade payables, accrued liabilities
+- Long-term Liabilities: loans, deferred items
+- Equity: share capital, retained earnings / accumulated deficit
+
+NEVER stop after reading the first subtotal. NEVER skip a section. Every row in the JSON is real data.
+If a section label is unfamiliar (e.g. "Deposit", "BTC Available", "Contra account") — include it, do not skip it.
 
 Respond ONLY with valid JSON. No markdown, no backticks.
 """
@@ -185,9 +203,6 @@ def analyse(interpreter_result: dict) -> dict:
             }],
         )
 
-        if response.stop_reason == "max_tokens":
-            logger.error(f"Analyst response truncated at max_tokens — JSON will be invalid. Question: '{question}'")
-
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -215,11 +230,10 @@ def analyse(interpreter_result: dict) -> dict:
 def _build_data_context(results: list) -> str:
     """
     Convert raw QB API results into a readable context string for Claude.
-    Applies a per-call character budget to prevent context overflow on
-    multi-month forecast queries (6 P&L reports = ~48K chars uncapped).
+    Reports get a larger budget than queries — balance sheets can be large.
     """
-    # Budget: 6000 chars per call, max 10 calls = 60K total (safe for Claude context)
-    PER_CALL_BUDGET = 6000
+    QUERY_BUDGET = 6000   # Bills/invoices — individual records
+    REPORT_BUDGET = 20000 # P&L, Balance Sheet — full report JSON needed
     parts = []
 
     for i, result in enumerate(results):
@@ -246,8 +260,8 @@ def _build_data_context(results: list) -> str:
 
             parts.append(f"[Call {i+1}: Query — {entity_name}, {total_count} total, returning {len(items[:100])}]")
             raw = json.dumps({entity_name: items[:100]}, indent=2)
-            if len(raw) > PER_CALL_BUDGET:
-                raw = raw[:PER_CALL_BUDGET] + "\n... [truncated]"
+            if len(raw) > QUERY_BUDGET:
+                raw = raw[:QUERY_BUDGET] + "\n... [truncated]"
             parts.append(raw)
 
         elif call.get("type") == "report":
@@ -258,8 +272,8 @@ def _build_data_context(results: list) -> str:
                 label += f" ({params['start_date']} to {params.get('end_date', '')})"
             parts.append(f"[Call {i+1}: Report — {label}]")
             raw = json.dumps(data, indent=2)
-            if len(raw) > PER_CALL_BUDGET:
-                raw = raw[:PER_CALL_BUDGET] + "\n... [truncated]"
+            if len(raw) > REPORT_BUDGET:
+                raw = raw[:REPORT_BUDGET] + "\n... [truncated]"
             parts.append(raw)
 
     return "\n\n".join(parts) if parts else "No data was returned from QuickBooks."

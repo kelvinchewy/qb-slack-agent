@@ -133,11 +133,11 @@ def _format_standard(analysis: dict) -> list[dict]:
 def _format_pnl_by_line(analysis: dict) -> list[dict]:
     """
     P&L by business line layout.
-    Shows separate blocks per line (Hosting / Mining / Others) with accrual flags.
-    Falls back to standard if business_lines is missing.
+    Filters to only the requested line(s) based on the question.
+    Shows all lines only when question contains "all" or no specific line is mentioned.
     """
     blocks = []
-    question = analysis.get("question", "")
+    question = (analysis.get("question") or "").lower()
     direct_answer = analysis.get("direct_answer", "")
     key_findings = analysis.get("key_findings", [])
     proactive_flags = analysis.get("proactive_flags", [])
@@ -146,7 +146,18 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
     data_completeness = analysis.get("data_completeness", "")
     business_lines = analysis.get("business_lines")
 
-    q_display = question[:70] + ("..." if len(question) > 70 else "")
+    # Determine which lines to show.
+    # show_all when no specific line is mentioned, OR "all business lines"/"all lines" is explicit.
+    # Using "all" alone is NOT sufficient — "show hosting P&L for all of last month" should not
+    # trigger show_all and display mining/others.
+    has_specific_line = any(x in question for x in ["hosting", "mining", "others"])
+    show_all = not has_specific_line or "all business lines" in question or "all lines" in question
+    show_hosting = show_all or "hosting" in question
+    show_mining = show_all or "mining" in question
+    show_others = show_all or "others" in question
+
+    q_display = analysis.get("question", "")[:70]
+    q_display += ("..." if len(analysis.get("question", "")) > 70 else "")
     badge = COMPLETENESS_EMOJI.get(data_completeness, "")
     blocks.append(header(f"📊 {q_display}" + (f"  {badge}" if badge else "")))
     blocks.append(divider())
@@ -154,14 +165,15 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
 
     currency = analysis.get("currency", "MYR")
 
-    # Business line breakdown blocks
     if business_lines:
         line_configs = [
-            ("hosting",  "🏠 HOSTING"),
-            ("mining",   "⛏️ MINING"),
-            ("others",   "📦 OTHERS"),
+            ("hosting", "🏠 HOSTING", show_hosting),
+            ("mining",  "⛏️ MINING",  show_mining),
+            ("others",  "📦 OTHERS",  show_others),
         ]
-        for key, label in line_configs:
+        for key, label, should_show in line_configs:
+            if not should_show:
+                continue
             line = business_lines.get(key)
             if not line:
                 continue
@@ -178,29 +190,56 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
                 f"Net: `{net_sign}{currency} {net:,.0f}`"
             ))
 
-        total = business_lines.get("total")
-        if total:
-            blocks.append(divider())
-            t_rev = total.get("revenue", 0)
-            t_costs = total.get("costs", 0)
-            t_net = total.get("net", 0)
-            t_sign = "+" if t_net >= 0 else ""
-            blocks.append(section(
-                f"*━━━ COMBINED TOTAL ━━━*\n"
-                f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
-                f"Net: `{t_sign}{currency} {t_net:,.0f}`"
-            ))
+        # Only show combined total when showing all lines
+        if show_all:
+            total = business_lines.get("total")
+            if total:
+                blocks.append(divider())
+                t_rev = total.get("revenue", 0)
+                t_costs = total.get("costs", 0)
+                t_net = total.get("net", 0)
+                t_sign = "+" if t_net >= 0 else ""
+                blocks.append(section(
+                    f"*━━━ COMBINED TOTAL ━━━*\n"
+                    f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
+                    f"Net: `{t_sign}{currency} {t_net:,.0f}`"
+                ))
 
-    # Line item table (actuals vs accruals)
+    # Detail table — filter rows to only show requested line
     if detail_table:
         hdrs = detail_table.get("headers", [])
         rows = detail_table.get("rows", [])
         if hdrs and rows:
+            # Filter rows to only the requested business line
+            if not show_all:
+                requested = []
+                if show_hosting:
+                    requested.append("hosting")
+                if show_mining:
+                    requested.append("mining")
+                if show_others:
+                    requested.append("others")
+                # Keep rows where first column matches requested line (case-insensitive)
+                filtered_rows = [
+                    r for r in rows
+                    if any(req in str(r[0]).lower() for req in requested)
+                    or str(r[0]).lower() in ("net result", "total", "combined total")
+                ]
+                rows = filtered_rows if filtered_rows else rows
+
             blocks.append(divider())
             blocks.extend(_render_table(hdrs, rows))
 
     if key_findings:
         blocks.append(divider())
+        # Filter findings to relevant line only
+        if not show_all:
+            relevant = [f for f in key_findings if
+                        (show_mining and "mining" in f.lower()) or
+                        (show_hosting and "hosting" in f.lower()) or
+                        (show_others and "others" in f.lower()) or
+                        not any(x in f.lower() for x in ["mining", "hosting", "others"])]
+            key_findings = relevant if relevant else key_findings
         blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
 
     if proactive_flags:

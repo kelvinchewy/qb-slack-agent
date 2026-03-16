@@ -117,20 +117,22 @@ def process_and_reply(client, channel: str, thread_ts: str | None, user_message:
             pass
 
 
-def _slash_worker(respond, natural_language_query: str):
+def _slash_worker(respond, natural_language_query: str, thinking_done: bool = False):
     """
     Runs the full pipeline in a background thread.
-    Uses a single respond() call — Slack slash commands show nothing until
-    respond() is called, so we respond once with the final result.
-    The ack() in the handler prevents the 3-second timeout.
+    Posts thinking message first (unless thinking_done=True — used when caller
+    already posted a thinking message, e.g. handle_clarification).
+    Then replaces with real answer via replace_original=True.
     """
     try:
         logger.info(f"Slash command query: '{natural_language_query}'")
+        if not thinking_done:
+            respond("⏳ Looking into that, give me a moment...")
         blocks, intent = _run_pipeline(natural_language_query)
-        respond(blocks=blocks, text=f"Finance report: {intent}")
+        respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
     except Exception as e:
         logger.error(f"Slash command error: {e}")
-        respond(text="Something went wrong. Please try again.")
+        respond(text="Something went wrong. Please try again.", replace_original=True)
 
 
 def process_slash(respond, natural_language_query: str):
@@ -230,9 +232,9 @@ def handle_bills(ack, respond, command):
         process_slash(respond=respond, natural_language_query=query)
         return
 
-    # Check if this is a specific vendor query and needs clarification
+    # Check if this is an aggregate query (no specific vendor)
     lower = text.lower()
-    is_aggregate = any(w in lower for w in ["all", "top", "others", "every"])
+    is_aggregate = any(w in lower for w in ["all", "top", "others", "every", "customer", "customers"])
 
     if not is_aggregate:
         # Extract potential vendor name (words before time words)
@@ -271,52 +273,59 @@ def handle_bills(ack, respond, command):
 @slack_app.command("/nb-invoices")
 def handle_invoices(ack, respond, command):
     """
-    /invoices [customer or all] [period]
+    /nb-invoices [customer or all] [period]
     Default: all customers, past 3 months
     Examples:
-      /invoices                         → all customers, past 3 months
-      /invoices Northstar last quarter  → Northstar drill-down
-      /invoices all last quarter        → all customers listed
+      /nb-invoices                          → all customers, past 3 months
+      /nb-invoices Northstar last quarter   → Northstar drill-down
+      /nb-invoices all last quarter         → all customers listed
     """
     ack()
     text = (command.get("text") or "").strip()
 
     if not text:
-        query = "show me all invoices for all customers past 3 months"
-        process_slash(respond=respond, natural_language_query=query)
+        process_slash(respond=respond, natural_language_query="show me all invoices for all customers past 3 months")
         return
 
     lower = text.lower()
-    is_aggregate = any(w in lower for w in ["all", "top", "every"])
+    # Treat "vendors", "vendor", "all", "top", "every" as aggregate — no specific customer
+    is_aggregate = any(w in lower for w in ["all", "top", "every", "vendor", "vendors"])
 
-    if not is_aggregate:
-        time_words = ["past", "last", "this", "since", "from", "in", "for"]
-        words = text.split()
-        customer_words = []
-        for w in words:
-            if w.lower() in time_words:
-                break
-            customer_words.append(w)
-        customer_term = " ".join(customer_words).strip()
+    if is_aggregate:
+        # Strip any mention of "vendors"/"vendor" — invoices are always for customers
+        clean = text.lower().replace("vendors", "").replace("vendor", "").replace("all", "").strip()
+        period = clean or "past 3 months"
+        process_slash(respond=respond, natural_language_query=f"show me all invoices for all customers {period}")
+        return
 
-        if customer_term:
-            matches = _get_customer_matches(customer_term)
-            if len(matches) == 0:
-                from qb_interpreter import _entity_cache
-                customer_list = _entity_cache.get("customers", [])
-                customer_text = "\n".join(f"• {v}" for v in customer_list[:20])
-                respond(f"❓ No customers found matching *\"{customer_term}\"*.\n\nYour customers:\n{customer_text}")
-                return
-            elif len(matches) > 1:
-                period = text[len(customer_term):].strip() or "past 3 months"
-                template = f"show me all invoices for {{name}} {period}"
-                respond(blocks=_clarification_blocks(customer_term, matches, template, entity_type="customer"),
-                        text=f"Multiple customers match '{customer_term}'")
-                return
-            text = f"{matches[0]} {text[len(customer_term):].strip()}"
+    # Specific customer name — extract term and resolve
+    time_words = ["past", "last", "this", "since", "from", "in", "for"]
+    words = text.split()
+    customer_words = []
+    for w in words:
+        if w.lower() in time_words:
+            break
+        customer_words.append(w)
+    customer_term = " ".join(customer_words).strip()
 
-    query = f"show me all invoices for {text}" if text else "show me all invoices past 3 months"
-    process_slash(respond=respond, natural_language_query=query)
+    if customer_term:
+        matches = _get_customer_matches(customer_term)
+        if len(matches) == 0:
+            from qb_interpreter import _entity_cache
+            customer_list = _entity_cache.get("customers", [])
+            customer_text = "\n".join(f"• {c}" for c in customer_list[:20])
+            respond(f"❓ No customers found matching *\"{customer_term}\"*.\n\nYour customers:\n{customer_text}")
+            return
+        elif len(matches) > 1:
+            period = text[len(customer_term):].strip() or "past 3 months"
+            template = f"show me all invoices for {{name}} {period}"
+            respond(blocks=_clarification_blocks(customer_term, matches, template, entity_type="customer"),
+                    text=f"Multiple customers match '{customer_term}'")
+            return
+        # Single match — rewrite with exact QB name
+        text = f"{matches[0]} {text[len(customer_term):].strip()}"
+
+    process_slash(respond=respond, natural_language_query=f"show me all invoices for {text}")
 
 
 @slack_app.command("/nb-vendors")
@@ -422,9 +431,11 @@ def handle_clarification(ack, body, respond):
         return
     logger.info(f"Clarification selected: '{query}'")
     respond("⏳ Got it, looking that up...", replace_original=True)
+    # thinking_done=True — caller already posted the thinking message above,
+    # so _slash_worker skips its own respond("⏳...") to avoid an orphaned message.
     threading.Thread(
         target=_slash_worker,
-        args=(respond, query),
+        args=(respond, query, True),
         daemon=True,
     ).start()
 
@@ -525,8 +536,6 @@ def callback():
         qb_agent._token_manager.refresh_token = refresh_token
         qb_agent._token_manager.expires_at = time.time() + tokens.get("expires_in", 3600)
         logger.info("✅ In-memory tokens updated.")
-        # Persist both tokens to Railway in background — this is the only place
-        # QB_ACCESS_TOKEN is written to Railway (once per OAuth flow, not per refresh).
         threading.Thread(target=qb_agent._persist_tokens_to_railway, args=(access_token, refresh_token), daemon=True).start()
         # Refresh entity cache with new valid tokens
         threading.Thread(target=refresh_entity_cache, daemon=True).start()
