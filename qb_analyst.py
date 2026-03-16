@@ -151,6 +151,24 @@ For SINGLE PERIOD Others P&L:
   One row per expense account. List ALL accounts, sorted by amount descending.
   Add NET RESULT at bottom.
 
+For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining and hosting"):
+  Show one section per business line, each using the SINGLE PERIOD format for that line.
+  Separate sections with a blank row. End with a COMBINED NET row.
+  Example structure for Mining + Hosting:
+    Revenue:Realised         → MYR X   actual
+    Revenue:Un-Realised      → MYR X   (accrued)
+    Utility - Nexbase        → MYR X   (accrued)
+    Rent or lease            → MYR X   actual
+    MINING NET               → MYR X
+    [blank row]
+    Northstar Invoice(s)     → MYR X   actual
+    Utility - AA             → MYR X   (accrued)
+    HOSTING NET              → MYR X
+    [blank row]
+    COMBINED NET             → MYR X
+  NEVER use "MINING REVENUE", "MINING COSTS", "HOSTING REVENUE", "HOSTING COSTS" as row labels —
+  always use the actual QB account names.
+
 For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - Each call result is a separate monthly P&L — labelled with its date range
 - Extract the relevant business line figures from EACH monthly report separately
@@ -274,7 +292,7 @@ def analyse(interpreter_result: dict) -> dict:
         client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=4000,
+            max_tokens=6000,
             system=_build_analyst_system(),
             messages=[{
                 "role": "user",

@@ -240,7 +240,7 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
                 filtered_rows = [
                     r for r in rows
                     if any(req in str(r[0]).lower() for req in requested)
-                    or str(r[0]).lower() in ("net result", "total", "combined total")
+                    or str(r[0]).lower() in ("net result", "total", "combined total", "combined net")
                 ]
                 rows = filtered_rows if filtered_rows else rows
 

@@ -146,7 +146,11 @@ Today is {today}.
 Generate a JSON plan for fetching the data needed to answer the question.
 
 DECISION RULES:
-1. Expense category total only (no vendor detail asked) → ProfitAndLoss report only
+1. Expense category total / business line revenue / P&L / "show me mining revenue" / "hosting revenue" / "how much did we earn" → ProfitAndLoss report only
+   Revenue for ALL business lines lives in the ProfitAndLoss report — NOT in Invoice or Bill queries.
+   Mining revenue = Revenue:Realised + Revenue:Un-Realised accounts in the P&L.
+   Hosting revenue = Northstar invoices recognised in the P&L (not a raw Invoice query).
+   NEVER use an Invoice query to answer a revenue or P&L question.
 2. Expense category + vendor/payee detail → Chain: ProfitAndLoss THEN Bill query
 3. Balance sheet / financial position → BalanceSheet report
 4. "Who owes us" / outstanding AR / customer invoices we sent → AgedReceivables report
