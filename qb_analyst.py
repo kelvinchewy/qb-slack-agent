@@ -142,9 +142,13 @@ For VENDOR/BILL queries:
 - Total at bottom
 - If no bills found for vendor in period: say so clearly, suggest checking date range
 
-For INVOICE queries:
+For INVOICE queries (general /invoices command — NOT hosting revenue):
 - resolved_customers will be provided — filter Invoice results to those customers only
-- Detail table: Invoice #, Date, Customer, Amount — sorted by date descending
+- Amount per invoice = HomeTotalAmt (full MYR total of the invoice as recorded in QB)
+  If HomeTotalAmt is absent or zero: use TotalAmt × ExchangeRate from the invoice object.
+  DO NOT filter by line item type — use the complete invoice total, including all line items.
+  The Services-only filter applies ONLY to the /hosting revenue query, NEVER to general invoice queries.
+- Detail table: Invoice #, Date, Customer, Amount (MYR) — sorted by date descending
 - Total at bottom
 - Show invoice numbers prominently (e.g. #1009, #1010)
 
