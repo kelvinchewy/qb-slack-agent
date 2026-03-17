@@ -159,13 +159,14 @@ Status logic:
 - Bill with Balance = 0 → "Paid"
 - Purchase → always "Paid" (immediate payment — no Balance field)
 
-Detail table format: Date | Vendor | Amount (MYR) | Status
+Detail table format: Date | Ref # | Vendor | Amount (MYR) | Status
 - Date = TxnDate (YYYY-MM-DD) for both Bills and Purchases
-- Vendor = VendorRef.name (Bill) or EntityRef.name (Purchase); if longer than 28 chars, truncate to 27 and append "…" (28 total)
+- Ref # = DocNumber if present and non-empty, else the QB Id; cap at 14 characters
+- Vendor = VendorRef.name (Bill) or EntityRef.name (Purchase); if longer than 22 chars, truncate to 21 and append "…" (22 total)
 - Amount = TotalAmt — QB reports amounts in the company home currency (MYR); no conversion needed here
 - Status = from logic above
 - Sort: (1) Overdue by DueDate ASC, (2) Unpaid with a DueDate by DueDate ASC, (3) Unpaid with no DueDate, (4) Paid by TxnDate DESC
-- DO NOT include Bill #, Account, or % of Total columns — they make the table too wide for Slack
+- DO NOT include Account or % of Total columns — they make the table too wide for Slack
 
 Totals:
 - Show UNPAID TOTAL (sum of all Overdue + Unpaid bills) and PAID TOTAL (sum of Paid bills + all Purchases) separately

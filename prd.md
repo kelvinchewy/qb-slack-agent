@@ -170,11 +170,11 @@ Output — specific vendor:
 ```
 S AND E TRADING SDN BHD — Past 3 Months + All Unpaid
 
-  Date        Vendor              Amount (MYR)   Status
-  ----------  ------------------  ------------   -------
-  2026-01-28  S And E Trading     49,200.00      Overdue
-  2026-02-28  S And E Trading     49,200.00      Unpaid
-  2026-01-31  S And E Trading         30.32      Paid
+  Date        Ref #           Vendor                 Amount (MYR)   Status
+  ----------  --------------  ---------------------  ------------   -------
+  2026-01-28  I26S&E02        S And E Trading        49,200.00      Overdue
+  2026-02-28  I26S&E04        S And E Trading        49,200.00      Unpaid
+  2026-01-31  EXP-001         S And E Trading            30.32      Paid
 
   UNPAID TOTAL                    98,400.00
   PAID TOTAL                          30.32
@@ -406,7 +406,7 @@ All slash commands have natural language equivalents via `@Nexbase Finance Agent
 - Sort: Overdue/Unpaid first (by DueDate ASC), then Paid (by TxnDate DESC)
 - Reports Unpaid Total and Paid Total separately, then Grand Total
 
-**Detail table columns:** Date | Vendor (truncated to 28 chars) | Amount (MYR) | Status
+**Detail table columns:** Date | Ref # (DocNumber, 14 char cap) | Vendor (truncated to 22 chars) | Amount (MYR) | Status
 
 ### 6.2 Invoices (AR) — ✅ Sprint 3
 **QB API:** `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100`
