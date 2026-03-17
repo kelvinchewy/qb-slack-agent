@@ -4,7 +4,7 @@
 **Owner:** Kelvin (kelvin@hashing.com)
 **Version:** 4.3
 **Last Updated:** March 16, 2026
-**Status:** Sprint 3 in progress — Multi-currency, month-by-month breakdown, Business Line P&L
+**Status:** Sprint 3 complete — Sprint 5 next (Anomaly Detection + Scheduled Reports)
 
 ---
 
@@ -719,62 +719,115 @@ Bot responds in Slack with mock reports. Quarterly summary, balance sheet, help.
 ### Sprint 2 ✅ COMPLETE — Real Data + Infrastructure
 Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB connected.
 
-### Sprint 3 🔄 IN PROGRESS — Vendor/Transaction + Slash Commands + Business Line P&L
+### Sprint 3 ✅ COMPLETE — Vendor/Transaction + Slash Commands + Business Line P&L
 
-**Completed:**
-- [x] Entity name resolution — vendor/customer cache, fuzzy matching
-- [x] VendorRef.name SQL bug fixed — all Bill queries use date-range-only
+- [x] Entity name resolution — vendor/customer cache, fuzzy matching, clarification buttons
+- [x] VendorRef.name SQL bug fixed — all queries use date-range-only, analyst filters by name
 - [x] Resolved vendor/customer names passed to analyst explicitly
-- [x] Sprint 3 QB query types: large transactions, new vendors, BillPayment
+- [x] All QB query types live: large transactions, new vendors, BillPayment, Purchase
 - [x] Default date range for vendor/invoice queries → 3 months
-
-**Remaining:**
-- [ ] **Step 1 — Token persistence fix**
-  - Startup health check: warn if token is expired at boot
-  - Retry logic for Railway GraphQL persistence call
-- [ ] **Step 2 — Vendor/customer cache on startup**
-  - Load at boot in background thread, not lazily
-  - 24h refresh cycle
-- [ ] **Step 3 — 7 slash commands in app.py**
-  - Register all 7 in Slack app settings
-  - Each parses text → constructs natural language query → same pipeline
-  - Clarification buttons for ambiguous vendor/customer names
-  - Interactive button handler for clarification responses
-- [ ] **Step 4 — Business line P&L logic**
-  - Account classification config in analyst (AA = hosting, Nexbase = mining, else = others)
-  - `/pnl` planner rules + formatter (per-line blocks with accrual flags)
-  - `/summary` formatter (grid layout: Hosting / Mining / Others / Total)
-  - Others drill-down: `/pnl others` → by account category, `/nb-expenses others` → by vendor
-
-**Exit criteria:** All 7 slash commands work. `/pnl mining`, `/pnl others`, `/pnl all` return correct segmented results with accrual flagging. `/hosting` returns Northstar Services invoice revenue. Vendor clarification buttons work.
+- [x] Token persistence fix — startup health check, retry logic, Railway GraphQL persistence
+- [x] Vendor/customer cache loaded at boot in background thread, 24h refresh
+- [x] 8 slash commands shipped: `/nb-expenses`, `/nb-invoices`, `/nb-vendors`, `/nb-summary`, `/nb-balance`, `/nb-pnl`, `/nb-hosting`, `/nb-finance`
+- [x] Business line P&L — Mining / Others classification, accrual flagging, per-line formatter
+- [x] `/nb-hosting` — Northstar Services-only invoice revenue (excludes Billable Expense Income)
+- [x] `/summary` — grid layout Mining / Others / Total
+- [x] Month-by-month P&L (`pnl_monthly`) — per-month breakdown with totals
+- [x] Utility-Nexbase fallback logic — catches "Utilities" plural, flags in key_findings
+- [x] Mining net arithmetic-only — never sources from QB net income
+- [x] `/nb-expenses` unified Bill + Purchase view — all unpaid (any age) + recent paid + vendor-only Purchases; Overdue/Unpaid/Paid status; slim 5-column table
+- [x] HTTP API documented in PRD with request/response schema and example queries
+- [x] Multi-currency via QB ExchangeRate API — on-demand conversion with footnote
 
 ---
 
-### Sprint 4 — Period Comparisons
-- Month-to-month P&L comparison
-- YTD views, trailing 12-month
-- Side-by-side Slack formatting with top movers
+### Sprint 4 ⏭️ SKIPPED — Period Comparisons
+Month-by-month breakdown was delivered ahead of schedule in Sprint 3 (`pnl_monthly` report type covers the core need). Full YTD / trailing 12-month / side-by-side formatting deferred to v2 roadmap.
 
-### Sprint 5 — Anomaly Detection
-- Historical baseline per vendor (6-12 months)
-- Flags: >2x spend, duplicate payments, spend spikes
-- Scheduled weekly anomaly scan
+---
+
+### Sprint 5 🔜 NEXT — Anomaly Detection + Scheduled Reports
+
+**Goal:** Proactively surface financial anomalies and push scheduled digests to Slack without anyone asking.
+
+**Step 1 — Vendor spend baseline**
+- On demand: compare current period vendor spend vs same-period prior year or rolling 3-month average
+- Flag in `proactive_flags` when a vendor's bill is >2x their rolling average
+- Flag duplicate payments: same vendor + same amount within 30 days
+
+**Step 2 — P&L anomaly detection**
+- Flag any cost account that spiked >50% month-on-month
+- Flag months where Mining electricity (Utility-Nexbase) is missing entirely
+- Flag when hosting revenue drops to zero (missing Northstar invoice)
+
+**Step 3 — Outstanding bills ageing**
+- Flag bills overdue >30 days in every `/nb-expenses` response (already partially live via Overdue status)
+- Add a dedicated `/nb-aged` command: buckets unpaid bills into 0–30, 31–60, 61–90, 90+ days
+
+**Step 4 — Scheduled Slack digests (APScheduler)**
+- Monday 9AM SGT → weekly summary to `#ask-finance`: cash position + top 3 unpaid bills + any anomaly flags
+- 1st of month, 10AM SGT → previous month P&L (Mining + Others) posted automatically
+
+**Exit criteria:** Anomaly flags appear in `proactive_flags` on relevant queries. `/nb-aged` works. Weekly + monthly digests post to `#ask-finance` on schedule.
+
+---
 
 ### Sprint 6 — Payment Forecasting
-- Open bills by due date
-- Cash flow projection: current cash ± upcoming AP/AR
-- Recurring transaction schedule
+- Cash flow projection: current cash ± open AP (by due date) ± expected AR (open invoices)
+- Recurring transaction detection and schedule
+- `/nb-forecast` command: 30/60/90-day cash runway
 
-### Sprint 7 — Scheduling + Hardening
-- Automated report pushes (APScheduler):
-  - Monday 9AM SGT: weekly summary to `#ask-finance`
-  - 1st of month: previous month P&L
-- Access controls (Slack user group restrictions)
-- Rate limiting, error monitoring
+### Sprint 7 — Hardening + Access Controls
+- Slack user group restrictions (finance-only commands)
+- Rate limiting per user
+- Error monitoring (Sentry or Railway log alerts)
+- Automated QB token re-auth reminder if expiry is within 24h
 
 ---
 
-## 12. Security & Guardrails
+## 12. Running Costs
+
+### 12.1 Anthropic API
+
+Every user query triggers 4 Claude calls:
+
+| Step | Model | Est. Input | Est. Output | Cost/query |
+|------|-------|-----------|-------------|------------|
+| Entity detection | Haiku | ~600 tok | ~80 tok | ~$0.001 |
+| Vendor name resolution | Haiku | ~1,200 tok | ~60 tok | ~$0.001 |
+| Name validation | Haiku | ~800 tok | ~50 tok | ~$0.001 |
+| Query planning | Sonnet | ~3,000 tok | ~400 tok | ~$0.015 |
+| Data analysis | Sonnet | ~7,000 tok | ~800 tok | ~$0.033 |
+| **Total per query** | | | | **~$0.05** |
+
+The analysis call dominates — QB data JSON (P&L reports, bill lists) is large. Haiku steps are negligible.
+
+**Monthly cost at typical usage:**
+
+| Usage | Queries/day | Monthly API cost |
+|-------|-------------|-----------------|
+| Light — small team, occasional checks | 10 | ~$15 |
+| Moderate — daily use + cron jobs | 30 | ~$45 |
+| Heavy — multiple users, frequent | 60 | ~$90 |
+
+Expected for The Hashing Company: **$15–40/month**.
+
+### 12.2 Infrastructure
+
+| Service | Plan | Monthly cost |
+|---------|------|-------------|
+| Railway (hosting) | Starter | ~$5–10 |
+| QuickBooks Online | Existing subscription | — |
+| Slack | Existing workspace | — |
+| **Total infra** | | **~$5–10** |
+
+### 12.3 Total Estimated Running Cost
+
+**~$20–50/month** all-in at current usage. Scales linearly with query volume — no fixed per-seat cost.
+
+---
+
+## 13. Security & Guardrails
 
 | Concern | Mitigation |
 |---------|-----------|
@@ -790,7 +843,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 
 ---
 
-## 13. v2 Roadmap (Post-Sprint 7)
+## 14. v2 Roadmap (Post-Sprint 7)
 
 - **Mining KPIs:** Revenue per ASIC, cost per BTC mined, power cost ratio (requires mining pool + utility data from separate agent)
 - **Budget vs Actual:** Compare planned budgets against QB actuals (targets from Notion)
@@ -802,7 +855,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 
 ---
 
-## 14. Decision Log
+## 15. Decision Log
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
