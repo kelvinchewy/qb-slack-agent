@@ -748,48 +748,38 @@ Month-by-month breakdown was delivered ahead of schedule in Sprint 3 (`pnl_month
 
 ### Sprint 5 🔜 NEXT — Anomaly Detection + Scheduled Reports
 
-**Goal:** Surface anomalies inline when users run existing commands — no separate command to remember. Add one scheduled auto-post for monthly Mining P&L.
+**Goal:** Surface anomalies inline on `/nb-pnl` and `/nb-invoices` using data already fetched — no extra QB calls, no impact on table layout. Add one scheduled auto-post for monthly Mining P&L.
 
-**Design principle:** Anomaly checks are embedded into `/nb-expenses`, `/nb-pnl`, and `/nb-invoices` responses. They appear as a dedicated block below the main table under the existing `proactive_flags` section — no new UI, no new commands. Each anomaly-enabled query fetches one additional QB call (prior 3-month comparison period), adding ~$0.015 per query to API cost.
+**Design principle:** No extra QB calls. No changes to `/nb-expenses` — keep that table clean. Anomaly checks work purely from the data the existing queries already return. Findings appear in the `proactive_flags` block that already renders below every response — zero new UI or formatter work.
 
 ---
 
-**Step 1 — Inline anomaly checks on `/nb-expenses`**
+**Step 1 — Inline anomaly checks on `/nb-pnl`**
 
-When expenses are fetched, the interpreter also fetches the prior 3 months of bills for the same vendor(s). The analyst compares and flags in `proactive_flags`:
-- Vendor spend this period is >2× their 3-month rolling average → flag with amounts
-- Same vendor, same amount appears within 30 days → flag as possible duplicate
-- A vendor that appeared every month for 3+ months is now missing → flag
+Analyst inspects the P&L data it already has and flags in `proactive_flags`:
+- Utility-Nexbase is missing or zero → flag ("No electricity cost recorded — accrual entry may be missing")
+- Utility-Nexbase is unusually large (>2× Rent or lease, which is a stable reference) → flag with amount
+- Mining revenue is zero for the period → flag
+- Hosting revenue is zero (no Northstar invoices found) → flag
 
-**Step 2 — Inline anomaly checks on `/nb-pnl`**
+**Step 2 — Inline anomaly checks on `/nb-invoices`**
 
-When a P&L is fetched, the interpreter also fetches the prior month's P&L. The analyst compares and flags:
-- Any cost account spiked >50% vs prior month → flag with delta
-- Utility-Nexbase is missing for the current month → flag (may indicate missing accrual entry)
-- Hosting revenue is zero → flag if prior months had Northstar invoices
+Analyst inspects the invoice data it already has and flags in `proactive_flags`:
+- No Northstar invoice found in the period → flag ("No hosting invoice found — check if billing was raised")
+- Multiple invoices to the same customer with identical amounts in the same period → flag as possible duplicate
 
-**Step 3 — Inline anomaly checks on `/nb-invoices`**
-
-When invoices are fetched, the interpreter fetches prior 3 months for comparison. The analyst flags:
-- No Northstar invoice this month when prior months had one → flag with days since last invoice
-- Invoice total for a customer is significantly higher or lower than their average
-
-**Step 4 — Scheduled Mining P&L digest (APScheduler)**
+**Step 3 — Scheduled Mining P&L digest (APScheduler)**
 
 Auto-posts previous month Mining P&L to `#ask-finance` on the **3rd working day of each month**, 9AM SGT.
 - Uses the existing pipeline: `interpret_and_fetch` → `analyse` → `format_dynamic_analysis` → `chat_postMessage`
-- 3rd working day = skip Sat/Sun from the 1st of the month (no public holiday logic needed)
-- No new dependencies except adding `APScheduler` to `requirements.txt`
-- Scheduler runs inside the existing Railway process alongside Bolt + Flask
+- 3rd working day = skip Sat/Sun counting from the 1st (no public holiday logic needed)
+- Requires adding `APScheduler` to `requirements.txt` — no other new dependencies
+- Scheduler starts inside the existing Railway process alongside Bolt + Flask
+- Target channel: `#ask-finance` (channel ID stored in `SLACK_FINANCE_CHANNEL` env var)
 
-**API cost impact of Sprint 5:**
-- `/nb-expenses` with anomaly: +1 QB call, ~+$0.015/query
-- `/nb-pnl` with anomaly: +1 QB call, ~+$0.015/query
-- `/nb-invoices` with anomaly: +1 QB call, ~+$0.015/query
-- Cron job: 1 query/month ≈ negligible
-- Revised monthly estimate: **$25–55/month** at moderate usage
+**API cost impact:** No change from current baseline. Anomaly checks use existing fetched data only. Cron job = 1 query/month ≈ negligible. Monthly estimate unchanged at **$20–50/month**.
 
-**Exit criteria:** `proactive_flags` section shows anomaly findings on `/nb-expenses`, `/nb-pnl`, `/nb-invoices` when anomalies exist (empty when clean). Monthly Mining P&L posts automatically to `#ask-finance` on the 3rd working day.
+**Exit criteria:** `proactive_flags` fires correctly on `/nb-pnl` and `/nb-invoices` when anomalies exist, empty when clean. Monthly Mining P&L posts automatically to `#ask-finance` on the 3rd working day.
 
 ---
 
