@@ -111,9 +111,13 @@ If a name is mentioned, cross-reference the VENDOR and CUSTOMER lists below to d
   CORRECT for all invoices: SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
   Analyst will filter by customer name from the returned data.
 
-**Purchase** — outgoing payment records (bank transfers, card payments)
-  Use ONLY for: "show me payments to vendor X", specific payment lookups
-  Do NOT use for expense category analysis
+**Purchase** — immediate vendor payments (bank transfers, card payments)
+  These are vendor expenses paid on the spot — no liability created, always status = Paid.
+  Only Purchases where EntityRef.type == "Vendor" are shown in expense views — petty cash and non-vendor payees are excluded.
+  Safe header fields to filter on: TxnDate, TotalAmt, DocNumber
+  NEVER filter by EntityRef.name — fetch by date range, analyst filters by vendor name.
+  SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+  Vendor name is in EntityRef.name on the Purchase object.
 
 **Vendor** / **Customer** / **Account** — entity lookups
 
@@ -161,12 +165,18 @@ DECISION RULES:
 3. Balance sheet / financial position → BalanceSheet report
 4. "Who owes us" / outstanding AR / customer invoices we sent → AgedReceivables report
 5. "What we owe" / upcoming AP / vendor bills → AgedPayables report
-6. Specific vendor bills by name → fetch ALL bills for the period by date range only
-   NEVER use VendorRef.name in WHERE — it causes 400 Bad Request
-   Always: SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-   The analyst will filter by the resolved vendor name from the returned data.
-7. All bills for a period / "expense invoices" / "vendor invoices" → SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-8. Specific vendor name (from VENDOR list) → same as rule 6 — date-range-only Bill query
+6. Vendor bills / expenses / "what I owe" / "what I paid" / "all bills" / specific vendor name →
+   Always generate THREE calls:
+   a. ALL currently unpaid Bills (any age):
+      SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate ASC MAXRESULTS 100
+   b. Recent paid Bills in the date range:
+      SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+   c. Recent Purchases in the date range (immediate payments — always paid):
+      SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+   NEVER filter by VendorRef.name or EntityRef.name in SQL — analyst filters by vendor name from results.
+   Calls (a) and (b) may overlap for unpaid bills in the date range — analyst deduplicates by Id.
+7. All bills for a period → same as rule 6
+8. Specific vendor name → same as rule 6 — analyst filters combined results by resolved vendor name
 9. Customer invoices (AR) for a period → SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
 10. Specific customer name → same as rule 9 — date-range-only Invoice query, analyst filters by name
 11. Cash / bank balances → BalanceSheet report

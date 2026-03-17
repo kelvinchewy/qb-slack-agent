@@ -141,7 +141,7 @@ Type `/` in any Slack channel or DM to see all available commands. No `@mention`
 
 | Command | Default (no params) | Example with params |
 |---------|--------------------|--------------------|
-| `/bills` | All vendors, past 3 months | `/bills S And E past 6 months` |
+| `/nb-expenses` | All vendors, past 3 months | `/nb-expenses S And E past 6 months` |
 | `/invoices` | All customers, past 3 months | `/invoices Northstar last quarter` |
 | `/vendors` | All vendors ranked by spend, past 3 months | `/vendors past 6 months` |
 | `/summary` | Last completed month, all lines | `/summary last quarter` |
@@ -152,25 +152,33 @@ Type `/` in any Slack channel or DM to see all available commands. No `@mention`
 
 ### 5.2 Command Detail
 
-#### `/bills [vendor or all] [period]`
-Shows AP bills — money we owe vendors.
+#### `/nb-expenses [vendor or all] [period]`
+Shows vendor expenses — what we owe and what we paid. Combines QB **Bills** (AP liability) and **Purchases** (immediate vendor payments) to give a complete picture across both recording methods.
+
+**Vendor scope:** Only transactions where the payee is a QB Vendor are included (`VendorRef` on Bills, `EntityRef.type == "Vendor"` on Purchases). Non-vendor payees (employees, customers, blank petty cash entries) are excluded automatically — they don't match any vendor in the list.
+
+Always fetches: (1) ALL currently unpaid Bills regardless of age, (2) recent Bills in the date range, (3) recent Purchases with a QB Vendor payee in the date range. Deduplicates Bills by Id.
 
 ```
-/bills                              → all vendors, past 3 months
-/bills S And E past 6 months        → S And E drill-down, 6 months
-/bills top 5 last quarter           → top 5 vendors by total billed
-/bills others past 3 months         → vendors in the Others bucket only
+/nb-expenses                             → all vendors, past 3 months + all currently unpaid
+/nb-expenses S And E past 6 months       → S And E drill-down, 6 months + all currently unpaid S&E bills
+/nb-expenses top 5 last quarter          → top 5 vendors by total billed
+/nb-expenses others past 3 months        → vendors in the Others bucket only
 ```
 
 Output — specific vendor:
 ```
-S AND E TRADING SDN BHD — Past 6 Months
+S AND E TRADING SDN BHD — Past 3 Months + All Unpaid
 
-  Date        Bill #    Amount       Status
-  28.02.2026  I26S&E04  RM 49.09     Paid
-  28.02.2026  I26S&E04  RM 30.32     Paid
-  ...
-  Total                 RM626,058
+  Date        Vendor              Amount (MYR)   Status
+  ----------  ------------------  ------------   -------
+  2026-01-28  S And E Trading     49,200.00      Overdue
+  2026-02-28  S And E Trading     49,200.00      Unpaid
+  2026-01-31  S And E Trading         30.32      Paid
+
+  UNPAID TOTAL                    98,400.00
+  PAID TOTAL                          30.32
+  GRAND TOTAL                     98,430.32
 ```
 
 Output — all / top N:
@@ -355,7 +363,7 @@ Free-form natural language. Same as @mentioning the bot.
 If you spell a vendor name ambiguously, the bot asks back instead of returning zero:
 
 ```
-/bills TM past 6 months
+/nb-expenses TM past 6 months
 
 🔍 Found 2 vendors matching "TM":
 [TM Technology Services Sdn Bhd]  [Thomas Ung Agency Sdn Bhd]
@@ -380,10 +388,25 @@ All slash commands have natural language equivalents via `@Nexbase Finance Agent
 
 ## 6. Report Types & QB API Mapping
 
-### 6.1 Bills (AP) — ✅ Sprint 3
-**QB API:** `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100`
-- Never filter by VendorRef.name in SQL — fetch by date range, analyst filters
-- TotalAmt IS filterable: `AND TotalAmt > 'N'` for large transaction queries
+### 6.1 Vendor Expenses (`/nb-expenses`) — ✅ Sprint 3
+**QB entities:** `Bill` (AP liability — unpaid or paid) and `Purchase` (immediate vendor payment — always paid).
+
+**Vendor scope:** Only QB Vendor payees are shown. `VendorRef` on Bills is always a vendor. For Purchases, only include records where `EntityRef.type == "Vendor"` — this excludes petty cash, employee reimbursements, and any non-vendor payees that would never appear in the vendor list.
+
+**Three calls always generated:**
+1. `SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate ASC MAXRESULTS 100` — ALL currently unpaid Bills, any age
+2. `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100` — recent Bills (paid + unpaid)
+3. `SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100` — recent Purchases (analyst filters to Vendor payees only)
+
+**Analyst processing:**
+- Merges calls 1 and 2, deduplicating by Bill `Id`
+- Appends Purchases from call 3 where `EntityRef.type == "Vendor"`
+- Filters to `resolved_vendors` if a specific vendor was requested
+- Status: `Balance > 0` + `DueDate < today` → Overdue; `Balance > 0` → Unpaid; `Balance = 0` → Paid; Purchase → always Paid
+- Sort: Overdue/Unpaid first (by DueDate ASC), then Paid (by TxnDate DESC)
+- Reports Unpaid Total and Paid Total separately, then Grand Total
+
+**Detail table columns:** Date | Vendor (truncated to 28 chars) | Amount (MYR) | Status
 
 ### 6.2 Invoices (AR) — ✅ Sprint 3
 **QB API:** `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100`
@@ -469,7 +492,7 @@ Open bills by due date + recurring transactions + cash position = projected cash
 ```
 
 **Entry points:**
-- **Slash commands** (`/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`) — converted to natural language queries, fed into same pipeline
+- **Slash commands** (`/nb-expenses`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`) — converted to natural language queries, fed into same pipeline
 - **@mention / DM** — natural language, same pipeline
 - **HTTP POST /query** — agent-to-agent, same pipeline, JSON response
 
@@ -486,7 +509,7 @@ Open bills by due date + recurring transactions + cash position = projected cash
 
 #### `app.py` — Entry point
 - Slack Bolt (Socket Mode) + Flask (background thread)
-- Slash command handlers: `/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`
+- Slash command handlers: `/nb-expenses`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`
 - @mention handler + DM handler
 - Interactive button handler (clarification responses)
 - Flask routes: `/health`, `/query`, `/auth`, `/callback`, `/auth-status`
@@ -645,7 +668,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
   - Account classification config in analyst (AA = hosting, Nexbase = mining, else = others)
   - `/pnl` planner rules + formatter (per-line blocks with accrual flags)
   - `/summary` formatter (grid layout: Hosting / Mining / Others / Total)
-  - Others drill-down: `/pnl others` → by account category, `/bills others` → by vendor
+  - Others drill-down: `/pnl others` → by account category, `/nb-expenses others` → by vendor
 
 **Exit criteria:** All 7 slash commands work. `/pnl mining`, `/pnl others`, `/pnl all` return correct segmented results with accrual flagging. `/hosting` returns Northstar Services invoice revenue. Vendor clarification buttons work.
 
@@ -734,7 +757,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 | Mar 2026 | P&L always shows line item breakdown, never single net row | Users need to see individual accounts to understand the composition — collapsed tables are not useful |
 | Mar 2026 | Forecast/trend pipeline removed from scope | Was causing misclassification of bill/vendor queries as FORECAST_TREND; deferred to later sprint |
 | Mar 2026 | Accrual basis — Journal Entries flagged as (accrued) | Company runs accrual accounting; users need to distinguish estimates from actuals |
-| Mar 2026 | Others = single bucket unless drilled into | Keeps summary clean; `/pnl others` or `/bills others` reveals detail on demand |
+| Mar 2026 | Others = single bucket unless drilled into | Keeps summary clean; `/pnl others` or `/nb-expenses others` reveals detail on demand |
 | Mar 2026 | Clarification buttons for ambiguous vendor names | Return zero results is unhelpful — ask back with options instead |
 | Mar 2026 | Multi-currency via QB ExchangeRate API, not live FX | Consistency — same rate QB used when recording transactions; no external dependency |
 | Mar 2026 | Default currency = as-is from QB, conversion on-demand | Avoids silent conversion errors; user opts in explicitly with "in USD" / "in MYR" |

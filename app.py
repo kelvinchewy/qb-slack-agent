@@ -3,7 +3,7 @@ QB Slack Agent — Main entry point.
 Slack Bolt app using Socket Mode + Flask HTTP API for agent-to-agent calls.
 
 Entry points:
-  Slash commands: /nb-bills /nb-invoices /nb-vendors /nb-summary /nb-balance /nb-pnl /nb-finance
+  Slash commands: /nb-expenses /nb-invoices /nb-vendors /nb-summary /nb-balance /nb-pnl /nb-finance
   @mention / DM:  natural language via #ask-finance or direct message
   HTTP API:       POST /query (agent-to-agent, X-API-Key required)
 
@@ -216,22 +216,22 @@ def _clarification_blocks(term: str, matches: list[str], pending_query_template:
 
 # ─── Slash Command Handlers ───────────────────────────────────────────────
 
-@slack_app.command("/nb-bills")
-def handle_bills(ack, respond, command):
+@slack_app.command("/nb-expenses")
+def handle_expenses(ack, respond, command):
     """
-    /bills [vendor or all] [period]
-    Default: all vendors, past 3 months
+    /nb-expenses [vendor or all] [period]
+    Default: all vendors, past 3 months + all currently unpaid
     Examples:
-      /bills                            → all vendors, past 3 months
-      /bills S And E past 6 months      → specific vendor drill-down
-      /bills top 5 last quarter         → top 5 by spend
-      /bills others past 3 months       → Others bucket only
+      /nb-expenses                            → all vendors, past 3 months
+      /nb-expenses S And E past 6 months      → specific vendor drill-down
+      /nb-expenses top 5 last quarter         → top 5 by spend
+      /nb-expenses others past 3 months       → Others bucket only
     """
     ack()
     text = (command.get("text") or "").strip()
 
     if not text:
-        query = "show me all bills for all vendors past 3 months"
+        query = "show me all expenses for all vendors past 3 months"
         process_slash(respond=respond, natural_language_query=query)
         return
 
@@ -262,14 +262,14 @@ def handle_bills(ack, respond, command):
             elif len(matches) > 1:
                 # Ambiguous — show clarification buttons
                 period = text[len(vendor_term):].strip() or "past 3 months"
-                template = f"show me all bills for {{name}} {period}"
+                template = f"show me all expenses for {{name}} {period}"
                 respond(blocks=_clarification_blocks(vendor_term, matches, template),
                         text=f"Multiple vendors match '{vendor_term}'")
                 return
             # else: single confident match — fall through with resolved name
             text = f"{matches[0]} {text[len(vendor_term):].strip()}"
 
-    query = f"show me all bills for {text}" if text else "show me all bills past 3 months"
+    query = f"show me all expenses for {text}" if text else "show me all expenses past 3 months"
     process_slash(respond=respond, natural_language_query=query)
 
 

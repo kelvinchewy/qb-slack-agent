@@ -136,11 +136,44 @@ Respond with this JSON:
   "data_note": "Only if something is missing or unclear. Empty string if clean."
 }}
 
-For VENDOR/BILL queries:
-- resolved_vendors will be provided — filter Bill results to those vendors only
-- Detail table: Date, Bill #, Vendor, Amount, Status — sorted by date descending
-- Total at bottom
-- If no bills found for vendor in period: say so clearly, suggest checking date range
+For VENDOR/BILL / EXPENSE queries:
+The interpreter always fetches THREE result sets for bill/expense questions:
+  (a) ALL currently unpaid Bills (any age) — Balance > 0
+  (b) Recent Bills in the date range (mix of paid and unpaid)
+  (c) Recent Purchases in the date range (always Paid — immediate vendor payments)
+
+Combining the results:
+1. Merge calls (a) and (b) — they may overlap for unpaid bills within the date range.
+   Deduplicate by Bill Id: if the same Id appears in both, keep ONE record only.
+2. From call (c), only include Purchase records where EntityRef.type == "Vendor".
+   This excludes petty cash, employee reimbursements, and any non-vendor payees.
+   Purchases with a QB Vendor payee never overlap with Bills (different Id formats).
+3. If resolved_vendors is provided: further filter to only those vendors.
+   - Bills: match VendorRef.name against resolved_vendors
+   - Purchases: match EntityRef.name against resolved_vendors
+
+Status logic:
+- Bill with Balance > 0 AND DueDate < today → "Overdue"
+- Bill with Balance > 0 AND DueDate >= today → "Unpaid"
+- Bill with Balance > 0 AND no DueDate → "Unpaid"
+- Bill with Balance = 0 → "Paid"
+- Purchase → always "Paid" (immediate payment — no Balance field)
+
+Detail table format: Date | Vendor | Amount (MYR) | Status
+- Date = TxnDate (YYYY-MM-DD) for both Bills and Purchases
+- Vendor = VendorRef.name (Bill) or EntityRef.name (Purchase); if longer than 28 chars, truncate to 27 and append "…" (28 total)
+- Amount = TotalAmt — QB reports amounts in the company home currency (MYR); no conversion needed here
+- Status = from logic above
+- Sort: (1) Overdue by DueDate ASC, (2) Unpaid with a DueDate by DueDate ASC, (3) Unpaid with no DueDate, (4) Paid by TxnDate DESC
+- DO NOT include Bill #, Account, or % of Total columns — they make the table too wide for Slack
+
+Totals:
+- Show UNPAID TOTAL (sum of all Overdue + Unpaid bills) and PAID TOTAL (sum of Paid bills + all Purchases) separately
+- Show GRAND TOTAL at bottom
+- In direct_answer: lead with the unpaid/outstanding amount — that is what the CFO cares about most
+
+If resolved_vendors is provided but no results match those vendors: say clearly "No bills or expenses found for [vendor name] in this period — vendor may have no recorded transactions or may be listed under a different name in QuickBooks."
+If no transactions found at all in the period: say so clearly and suggest widening the date range.
 
 For INVOICE queries (general /invoices command — NOT hosting revenue):
 - resolved_customers will be provided — filter Invoice results to those customers only
