@@ -633,6 +633,82 @@ qb-slack-agent/
 | `GET` | `/auth-status` | None | Token state + Railway config debug |
 | `POST` | `/query` | `X-API-Key` | Agent-to-agent query endpoint |
 
+### POST /query — Request & Response
+
+**Request:**
+```
+POST /query
+X-API-Key: <QB_API_KEY>
+Content-Type: application/json
+
+{
+  "query": "what is our mining P&L for last month"
+}
+```
+
+The `query` field accepts plain English — same as asking the bot in Slack. See Section 5 for the full list of supported queries and slash command equivalents.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "question": "what is our mining P&L for last month",
+  "answer": "Mining net for February 2026 was MYR -45,231. Revenue was MYR 258,400; total costs MYR 303,631.",
+  "data": {
+    "key_findings": [
+      "Utility - Nexbase was the largest cost at MYR 297,602 (98% of costs)",
+      "Revenue:Un-Realised was MYR 0 — no accrual entry this month"
+    ],
+    "proactive_flags": [],
+    "summary_line": "Mining net: MYR -45,231 for Feb 2026",
+    "detail_table": {
+      "headers": ["Account", "Amount (MYR)", "Type", "% of Total"],
+      "rows": [
+        ["Revenue:Realised", "258,400", "actual", "100%"],
+        ["", "", "", ""],
+        ["Utility - Nexbase", "297,602", "(accrued)", "98%"],
+        ["Rent or lease", "6,029", "actual", "2%"],
+        ["", "", "", ""],
+        ["NET RESULT", "-45,231", "", ""]
+      ]
+    },
+    "data_completeness": "complete",
+    "data_note": ""
+  }
+}
+```
+
+**Error response:**
+```json
+{ "status": "error", "error": "Missing 'query' field" }
+```
+
+### Example queries for the HTTP API
+
+Use the same natural language as Slack. Some useful patterns:
+
+```
+# P&L
+"what is our mining P&L for last month"
+"show me P&L for the past 3 months month by month"
+"what are others costs for last quarter"
+
+# Expenses
+"show me all expenses past 3 months"
+"show me expenses from S And E past 6 months"
+
+# Invoices / Hosting
+"show me all invoices for last quarter"
+"what is hosting revenue for the past 3 months"
+
+# Summary & Balance
+"give me the financial summary for last month"
+"what is our current cash position"
+
+# Vendors
+"who are our top 5 vendors by spend last quarter"
+```
+
 ---
 
 ## 11. Sprint Plan
