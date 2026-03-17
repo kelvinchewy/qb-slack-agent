@@ -169,8 +169,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
     show_mining = show_all or "mining" in question
     show_others = show_all or "others" in question
 
-    q_display = analysis.get("question", "")[:70]
-    q_display += ("..." if len(analysis.get("question", "")) > 70 else "")
+    _q = analysis.get("question", "")
+    q_display = _q[:70] + ("..." if len(_q) > 70 else "")
     badge = COMPLETENESS_EMOJI.get(data_completeness, "")
     blocks.append(header(f"📊 {q_display}" + (f"  {badge}" if badge else "")))
     blocks.append(divider())
@@ -302,11 +302,17 @@ def _format_pnl_monthly(analysis: dict) -> list[dict]:
             t_net = total.get("net", 0)
             t_sign = "+" if t_net >= 0 else ""
             blocks.append(divider())
-            blocks.append(section(
-                f"*━━━ PERIOD TOTAL ━━━*\n"
-                f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
-                f"Net: `{t_sign}{currency} {t_net:,.0f}`"
-            ))
+            if t_costs != 0:
+                blocks.append(section(
+                    f"*━━━ PERIOD TOTAL ━━━*\n"
+                    f"Revenue: `{currency} {t_rev:,.0f}`   Costs: `{currency} {t_costs:,.0f}`   "
+                    f"Net: `{t_sign}{currency} {t_net:,.0f}`"
+                ))
+            else:
+                blocks.append(section(
+                    f"*━━━ PERIOD TOTAL ━━━*\n"
+                    f"Revenue: `{currency} {t_rev:,.0f}`"
+                ))
 
     blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
     blocks.append(_footer_block(data_completeness, data_note))
@@ -315,7 +321,7 @@ def _format_pnl_monthly(analysis: dict) -> list[dict]:
 
 def _format_summary_grid(analysis: dict) -> list[dict]:
     """
-    Summary grid layout: Hosting / Mining / Others / Total in a table.
+    Summary grid layout: Mining / Others / Total in a table.
     """
     blocks = []
     question = analysis.get("question", "")

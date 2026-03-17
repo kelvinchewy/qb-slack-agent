@@ -18,6 +18,7 @@ import anthropic
 from config import Config
 
 logger = logging.getLogger(__name__)
+_client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
 
 
 def _build_analyst_system() -> str:
@@ -35,12 +36,15 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
 - Revenue: ONLY "Revenue:Realised" and "Revenue:Un-Realised" — nothing else
 - Costs: ONLY these two buckets:
     1. Electricity cost — look for accounts in this priority order:
-       a. Any account containing "- Nexbase" or "Nexbase" (preferred — e.g. "Utility - Nexbase")
-       b. If NO "Nexbase" utility account exists for that period, fall back to any generic "Utility" account
-          that does NOT contain "AA" — "AA" accounts are hosting electricity classified under Others.
-          If only Utility-AA exists (no Nexbase, no other Utility), treat mining electricity as zero.
-       Flag the fallback in key_findings: "Utility - Nexbase not found for [month] — used generic Utility account instead. Verify with bookkeeper."
-       If only Utility-AA found: flag in key_findings: "No mining utility account found for [month] — electricity cost set to zero. Verify with bookkeeper."
+       a. Any account containing "Nexbase" (preferred — e.g. "Utility - Nexbase", "Utilities - Nexbase")
+       b. If NO "Nexbase" utility account exists, fall back to any account whose name starts with "Utilit"
+          (matches "Utility", "Utilities", "Utility - X", etc.) AND does NOT contain "AA" or "Nexbase".
+          Example: an account simply named "Utilities" or "Utility" qualifies as the fallback.
+          If only Utility-AA exists (no Nexbase, no other Utility/Utilities), treat mining electricity as zero.
+       Flag the fallback in key_findings: "Utility - Nexbase not found for [month] — used [account name] as fallback. Verify with bookkeeper."
+       If no utility account found at all: flag in key_findings: "No mining utility account found for [month] — electricity cost set to zero. Verify with bookkeeper."
+       IMPORTANT: Even if no Nexbase account is found, you MUST use the fallback Utility/Utilities account
+       in the mining cost calculation and show it as a row in the detail table. Do NOT silently omit it.
     2. "Rent or lease"
 - EXCLUDE from Mining entirely (move to Others — do NOT include in mining revenue, costs, or net):
     - ANY account with "fair value", "revaluation", or "Un-realised fair value losses" in its name
@@ -203,32 +207,37 @@ Required rows (one row each, skip only if value is truly zero in QB):
   1. Revenue:Realised          → amount from QB, actual
   2. Revenue:Un-Realised       → amount from QB, (accrued) if Journal Entry
   3. [blank separator row]
-  4. Utility - Nexbase         → amount from QB, (accrued) if Journal Entry
+  4. Utility row               → use the actual QB account name (e.g. "Utility - Nexbase", or fallback name like "Utilities")
+                                 amount from QB, (accrued) if Journal Entry. Skip only if truly zero after fallback check.
   5. Rent or lease             → amount from QB, actual
   6. [blank separator row]
   7. NET RESULT                → row 1 + row 2 − row 4 − row 5 (arithmetic only — NOT QB's net income figure)
+     NEVER use QB's "Net Income", "Net Earnings", or any P&L summary total for this row.
+     If Utility row used the fallback account, NET RESULT must still deduct that fallback amount.
 
 For SINGLE PERIOD Others P&L:
   One row per expense account. List ALL accounts, sorted by amount descending.
   Add NET RESULT at bottom.
 
-For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining and hosting"):
+For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining and others"):
   Show one section per business line, each using the SINGLE PERIOD format for that line.
   Separate sections with a blank row. End with a COMBINED NET row.
-  Example structure for Mining + Hosting:
+  Example structure for Mining + Others:
     Revenue:Realised         → MYR X   actual
     Revenue:Un-Realised      → MYR X   (accrued)
     Utility - Nexbase        → MYR X   (accrued)
     Rent or lease            → MYR X   actual
     MINING NET               → MYR X
     [blank row]
-    Northstar Invoice(s)     → MYR X   actual
-    Utility - AA             → MYR X   (accrued)
-    HOSTING NET              → MYR X
+    [revenue accounts if any]  → MYR X   actual
+    Utility - AA             → MYR X   actual
+    Amortisation expense     → MYR X   actual
+    OTHERS NET               → MYR X
     [blank row]
     COMBINED NET             → MYR X
-  NEVER use "MINING REVENUE", "MINING COSTS", "HOSTING REVENUE", "HOSTING COSTS" as row labels —
+  NEVER use "MINING REVENUE", "MINING COSTS", "OTHERS REVENUE", "OTHERS COSTS" as row labels —
   always use the actual QB account names.
+  Hosting is NOT a P&L segment — never include a HOSTING section in a combined P&L table.
 
 For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - report_type = "pnl_monthly"
@@ -238,17 +247,22 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - Add a TOTAL row at the bottom
 - direct_answer must reference the total across all months AND call out the best/worst month
 - Tables contain numbers only — no Notes column. All observations (revenue composition, zero months, anomalies) go into key_findings and direct_answer prose below the table, not inside table cells.
-- MISSING ACCOUNTS — per month fallback rules (NEVER leave a cell blank; always compute Net):
-    Mining electricity cost:
+- MISSING ACCOUNTS — per month fallback rules for Mining and Others ONLY (NOT applicable to hosting):
+  (NEVER leave a cell blank; always compute Net for Mining and Others)
+    Mining electricity cost per month:
       1. Use any account containing "Nexbase" (e.g. "Utility - Nexbase") if present.
-      2. If absent, fall back to a generic "Utility" account and flag in key_findings:
-         "Utility - Nexbase not found for [month] — used generic Utility. Verify with bookkeeper."
-      3. If neither exists, use 0 and flag in key_findings.
+      2. If absent, fall back to any account whose name starts with "Utilit" (e.g. "Utility", "Utilities")
+         AND does NOT contain "AA" or "Nexbase". Show it in the table and use it in Net computation.
+         Flag in key_findings: "Utility - Nexbase not found for [month] — used [account name]. Verify with bookkeeper."
+      3. If no qualifying utility account found at all: use 0, flag in key_findings.
     All other missing accounts (Revenue:Realised, Revenue:Un-Realised, Rent or lease): use 0.
 - Column format depends on business line:
     Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Total Costs | Net
     Others / any other line: Month | Revenue | Costs | Net
-    Hosting revenue (Invoice query): Month | Revenue (Northstar) | # Invoices
+    Hosting revenue (Invoice query): Month | Revenue (USD) | # Invoices
+      *** HOSTING MONTH-BY-MONTH HAS NO COSTS COLUMN, NO NET COLUMN, NO UTILITY-AA COLUMN ***
+      *** DO NOT add any cost or net columns to the hosting table — it is revenue-only ***
+      *** DO NOT add a Notes column — notes go in key_findings prose only ***
 - CRITICAL — Net must be computed arithmetically from the row's own cells, NOT taken from QB's P&L net income:
     Mining Net per row = row.Revenue − row.Utility-Nexbase − row.Rent-or-lease
     TOTAL row Net = sum of individual month Nets (or equivalently, TOTAL Revenue − TOTAL Utility − TOTAL Rent)
@@ -269,22 +283,24 @@ For SUMMARY GRID (/summary):
 
 For MONTH-BY-MONTH Bills (multiple Bill query results — one per month):
 - Each result covers one calendar month — label each row with the month name
-- Columns: Month | Total Billed (MYR) | # Bills | Notes
+- Columns: Month | Total Billed (MYR) | # Bills
 - One row per month, sorted chronologically oldest first
 - Add TOTAL row at bottom
-- Notes column: flag unusually high or zero months
+- No Notes column — observations (unusually high months, zero months) go in key_findings prose
 - If filtered to a specific vendor, scope to that vendor's bills only
 
 For MONTH-BY-MONTH Invoices (multiple Invoice query results — one per month):
 - Each result covers one calendar month — label each row with the month name
-- Columns: Month | Total Invoiced (MYR) | # Invoices | Notes
+- Columns: Month | Total Invoiced (MYR) | # Invoices
 - One row per month, sorted chronologically oldest first
 - Add TOTAL row at bottom
+- No Notes column — observations go in key_findings prose
 
 For MONTH-BY-MONTH BillPayments (multiple BillPayment query results — one per month):
-- Columns: Month | Total Paid (MYR) | # Payments | Notes
+- Columns: Month | Total Paid (MYR) | # Payments
 - One row per month, sorted chronologically oldest first
 - Add TOTAL row at bottom
+- No Notes column — observations go in key_findings prose
 
 For CHAINED CALLS (P&L + Bill together):
 - Use P&L for category totals
@@ -366,8 +382,7 @@ def analyse(interpreter_result: dict) -> dict:
     logger.info(f"Analysing QB data for: '{question}'{' | vendors: ' + str(resolved_vendors) if resolved_vendors else ''}")
 
     try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response = _client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=6000,
             system=_build_analyst_system(),
@@ -483,7 +498,7 @@ def _build_data_context(results: list) -> str:
         elif call.get("type") == "report":
             report_name = call.get("report_name", "Report")
             params = call.get("params", {})
-            label = f"{report_name}"
+            label = report_name
             if "start_date" in params:
                 label += f" ({params['start_date']} to {params.get('end_date', '')})"
             parts.append(f"[Call {i+1}: Report — {label}]")

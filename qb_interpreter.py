@@ -10,12 +10,14 @@ Never use SQL Purchase queries to look for expense categories.
 
 import json
 import logging
+import re
 from datetime import datetime
 import anthropic
 from config import Config
 import qb_agent
 
 logger = logging.getLogger(__name__)
+_client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
 
 
 def _today() -> str:
@@ -318,8 +320,7 @@ def _detect_entity(question: str) -> dict:
     Returns { "type": "vendor"|"customer"|None, "term": "search term"|None }
     """
     try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response = _client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=100,
             system=ENTITY_DETECT_SYSTEM,
@@ -402,8 +403,7 @@ def _resolve_vendor_name(user_term: str, vendor_list: list[str]) -> list[str] | 
     if not vendor_list:
         return None
     try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response = _client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
             system=VENDOR_MATCH_SYSTEM,
@@ -430,8 +430,7 @@ def _resolve_customer_name(user_term: str, customer_list: list[str]) -> list[str
     if not customer_list:
         return None
     try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response = _client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
             system=CUSTOMER_MATCH_SYSTEM,
@@ -455,7 +454,6 @@ def _generate_name_examples(names: list[str]) -> list[str]:
     Dynamically generate fuzzy match examples from real QB names.
     Shows the planner what kinds of shorthand map to each exact name.
     """
-    import re
     examples = []
     for name in names:
         variants = []
@@ -588,8 +586,7 @@ def _plan_calls(question: str) -> dict:
         enriched_question = question
 
     try:
-        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        response = _client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             system=system,

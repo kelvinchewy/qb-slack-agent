@@ -45,10 +45,13 @@ One P&L business line (Mining) and one revenue-only customer (Northstar/Hosting)
 |------|---------------------|
 | Revenue | `Revenue:Realised` (actual BTC sales via LUNO) |
 | Revenue | `Revenue:Un-Realised` (monthly BTC mark-to-market Journal Entries) |
-| Costs | Any account containing `- Nexbase` or `Nexbase` suffix (e.g. `Utility - Nexbase`) |
+| Costs | Any account containing `Nexbase` (e.g. `Utility - Nexbase`, `Utilities - Nexbase`) — preferred |
+| Costs | **Fallback:** if no Nexbase utility found, use any account whose name starts with `Utilit` (matches `Utility`, `Utilities`) and does NOT contain `AA` or `Nexbase`. Show in table, include in Net. Flag in key_findings. |
 | Costs | `Rent or lease` |
 
-Mining P&L shows **only** these four account types. All other accounts that appear in QB (Un-realised fair value losses, Amortisation, Management fees, Interest expense, Other expenses, etc.) are excluded from Mining and reported under Others. This keeps Mining focused on operational economics — electricity, hosting rent, and BTC revenue only.
+Mining P&L shows **only** these account types. All other accounts that appear in QB (Un-realised fair value losses, Amortisation, Management fees, Interest expense, Other expenses, etc.) are excluded from Mining and reported under Others. This keeps Mining focused on operational economics — electricity, rent, and BTC revenue only.
+
+**Mining Net = Revenue − Utility(Nexbase or fallback) − Rent or lease.** Always computed arithmetically from the table rows — never sourced from QB's P&L "Net Income" figure (which includes all accounts and will produce wrong totals).
 
 **HOSTING (REVENUE ONLY — not a P&L segment)**
 | Type | Source | QB Account / Pattern |
@@ -288,6 +291,12 @@ Net Others                       RM-217,777
 
 `/pnl all` shows both Mining and Others blocks followed by a combined total.
 
+#### Table Formatting Rules (all report types)
+
+- **No Notes column** in any table — not in P&L, bills, invoices, or hosting tables. All observations (zero months, anomalies, fallback warnings, best/worst month) go in the written key_findings and direct_answer text below the table.
+- **Net computed arithmetically** — Mining Net = Revenue − Utility − Rent, derived from the table rows. Never taken from QB's P&L "Net Income" field.
+- **Month-by-month tables** (bills, invoices, hosting): `Month | Amount | # Records` only. No extra columns.
+
 #### P&L Detail Table Format
 
 Every `/pnl` response always shows individual line items — never a single collapsed row. Columns: **Account | Amount (MYR) | Type | % of Segment Total**
@@ -394,7 +403,7 @@ Chain: ProfitAndLoss report + Bill query for same period. Analyst groups Bills b
 
 **Mining + Others:** ProfitAndLoss report for period. Accounts classified per Section 2.3. Utility-AA goes to Others. Journal Entries flagged as (accrued).
 
-**Hosting revenue (separate):** `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y'` → filter to Northstar (`CustomerRef.name` contains "NORTHSTAR"), sum `HomeTotalAmt`. No ProfitAndLoss call.
+**Hosting revenue (separate):** `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y'` → filter to Northstar (`CustomerRef.name` contains "NORTHSTAR"), sum `Services` line items only (`Amount × ExchangeRate` per invoice → MYR). `Billable Expense Income` lines excluded. No ProfitAndLoss call.
 
 ### 6.7 Large Transactions — ✅ Sprint 3
 **QB API:** `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' AND TotalAmt > 'N' ORDERBY TotalAmt DESC MAXRESULTS 100`
@@ -460,7 +469,7 @@ Open bills by due date + recurring transactions + cash position = projected cash
 ```
 
 **Entry points:**
-- **Slash commands** (`/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/finance`) — converted to natural language queries, fed into same pipeline
+- **Slash commands** (`/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`) — converted to natural language queries, fed into same pipeline
 - **@mention / DM** — natural language, same pipeline
 - **HTTP POST /query** — agent-to-agent, same pipeline, JSON response
 
@@ -477,7 +486,7 @@ Open bills by due date + recurring transactions + cash position = projected cash
 
 #### `app.py` — Entry point
 - Slack Bolt (Socket Mode) + Flask (background thread)
-- Slash command handlers: `/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/finance`
+- Slash command handlers: `/bills`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`
 - @mention handler + DM handler
 - Interactive button handler (clarification responses)
 - Flask routes: `/health`, `/query`, `/auth`, `/callback`, `/auth-status`
@@ -733,7 +742,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 | Mar 2026 | Month-by-month row filter bypass in formatter | Formatter row filter designed for account-name rows; month rows ("Oct 2025") don't contain business line keywords and were being stripped |
 | Mar 2026 | Combined P&L uses per-account rows per section, not summary labels | "MINING REVENUE" / "HOSTING COSTS" labels are meaningless — actual QB account names give context |
 | Mar 2026 | Revenue queries always route to ProfitAndLoss, never Invoice | Mining revenue (Revenue:Realised, Un-Realised) lives in P&L accounts; routing to Invoice returns zero |
-| Mar 2026 | Hosting revenue sourced from Invoice query, not ProfitAndLoss | Northstar invoices post to multiple QB income accounts (Services, Billable Expense Income, etc.) so the P&L understates hosting revenue. Invoice query sums HomeTotalAmt giving the correct full MYR total. |
+| Mar 2026 | Hosting revenue sourced from Invoice query, Services lines only | Northstar invoices contain two line item types: `Services` (actual hosting fee) and `Billable Expense Income` (pass-through recharges, not revenue). Only `Services` lines count. Sum each Services line Amount × ExchangeRate per invoice → MYR. HomeTotalAmt includes Billable Expense Income and must NOT be used. |
 | Mar 2026 | Hosting removed as P&L segment — revenue query only | Utility-AA costs are lagging (bills arrive after period close) so hosting cost vs revenue comparison in P&L is unreliable. Hosting = Invoice query for Northstar revenue only. Utility-AA classified under Others. P&L segments are Mining and Others only. |
 | Mar 2026 | "COMBINED NET" added to formatter row filter passthrough | Combined multi-line P&L net row was being silently stripped by business-line keyword filter |
 | Mar 2026 | max_tokens raised to 6000 | Prompt growth from detail table specs + currency rules exceeded 4000 token output budget |
