@@ -164,9 +164,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
     # show_all when no specific line is mentioned, OR "all business lines"/"all lines" is explicit.
     # Using "all" alone is NOT sufficient — "show hosting P&L for all of last month" should not
     # trigger show_all and display mining/others.
-    has_specific_line = any(x in question for x in ["hosting", "mining", "others"])
+    has_specific_line = any(x in question for x in ["mining", "others"])
     show_all = not has_specific_line or "all business lines" in question or "all lines" in question
-    show_hosting = show_all or "hosting" in question
     show_mining = show_all or "mining" in question
     show_others = show_all or "others" in question
 
@@ -181,7 +180,6 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
 
     if business_lines:
         line_configs = [
-            ("hosting", "🏠 HOSTING", show_hosting),
             ("mining",  "⛏️ MINING",  show_mining),
             ("others",  "📦 OTHERS",  show_others),
         ]
@@ -236,8 +234,6 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
 
             if not show_all and not is_monthly_table and is_combined_table:
                 requested = []
-                if show_hosting:
-                    requested.append("hosting")
                 if show_mining:
                     requested.append("mining")
                 if show_others:
@@ -258,9 +254,8 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
         if not show_all:
             relevant = [f for f in key_findings if
                         (show_mining and "mining" in f.lower()) or
-                        (show_hosting and "hosting" in f.lower()) or
                         (show_others and "others" in f.lower()) or
-                        not any(x in f.lower() for x in ["mining", "hosting", "others"])]
+                        not any(x in f.lower() for x in ["mining", "others"])]
             key_findings = relevant if relevant else key_findings
         blocks.append(section("\n".join(f"• {f}" for f in key_findings)))
 
@@ -341,11 +336,11 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
 
     if business_lines:
         blocks.append(divider())
-        headers_row = ["", "Hosting", "Mining", "Others", "Total"]
+        headers_row = ["", "Mining", "Others", "Total"]
         rows = []
         for metric, label in [("revenue", "Revenue"), ("costs", "Costs"), ("net", "Net")]:
             row = [label]
-            for key in ["hosting", "mining", "others", "total"]:
+            for key in ["mining", "others", "total"]:
                 val = business_lines.get(key, {}).get(metric, 0)
                 row.append(f"{currency} {val:,.0f}" if val != 0 else "—")
             rows.append(row)

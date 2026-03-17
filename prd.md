@@ -20,14 +20,15 @@ A conversational Slack agent that connects to QuickBooks Online, allowing non-fi
 
 **Company:** NEXBASE TECHNOLOGY SDN. BHD.
 
-Two business lines operate under the same QuickBooks entity:
+One P&L business line (Mining) and one revenue-only customer (Northstar/Hosting):
 
-### 2.1 Hosting (AA)
+### 2.1 Hosting — Northstar revenue only (not a P&L segment)
 - Provide mining infrastructure and electricity to external miners
-- Primary customer: **NORTHSTAR MANAGEMENT (HK) LIMITED** — invoiced monthly ~RM113–121K
-- Primary cost: Electricity from S And E Trading Sdn Bhd, allocated to **Utility - AA** accounts
-- Monthly Journal Entries posted for estimated electricity accruals (theoretical power consumption)
-- P&L: Northstar invoices (revenue) vs AA utility bills + accruals (costs)
+- Primary customer: **NORTHSTAR MANAGEMENT (HK) LIMITED** — invoiced monthly
+- Revenue = only **Services** line items on Northstar invoices (Facility Management, O&M fees)
+  `Billable Expense Income` line items are pass-through costs, not revenue — excluded
+- Utility-AA costs (electricity from S And E Trading) are classified under **Others**, not Hosting
+- Hosting has no cost segment in P&L — Utility-AA is a lagging value that doesn't pair with invoice periods
 
 ### 2.2 Mining (Nexbase)
 - Company mines BTC using its own ASICs (~200 machines across 2 Singapore sites)
@@ -49,19 +50,21 @@ Two business lines operate under the same QuickBooks entity:
 
 Mining P&L shows **only** these four account types. All other accounts that appear in QB (Un-realised fair value losses, Amortisation, Management fees, Interest expense, Other expenses, etc.) are excluded from Mining and reported under Others. This keeps Mining focused on operational economics — electricity, hosting rent, and BTC revenue only.
 
-**HOSTING**
+**HOSTING (REVENUE ONLY — not a P&L segment)**
 | Type | Source | QB Account / Pattern |
 |------|--------|---------------------|
-| Revenue | **Invoice query** (not P&L) | All invoices to NORTHSTAR MANAGEMENT (HK) LIMITED — sum of `HomeTotalAmt` (MYR) |
-| Costs | ProfitAndLoss report | Any account containing `- AA` or `AA` suffix (e.g. `Utility - AA`) |
+| Revenue | **Invoice query only** | Northstar invoices — sum of `Services` line items × `ExchangeRate` (MYR equivalent). `Billable Expense Income` line items are pass-throughs and excluded. |
+| Costs | **Not tracked in P&L** | Utility-AA costs are classified under Others (see below) |
 
-> **Why Invoice query for hosting revenue?** Northstar invoices contain multiple line items mapped to different QB income accounts (`Services`, `Billable Expense Income`, etc.). The P&L report aggregates by account and cannot attribute these back to Northstar — resulting in understated revenue. The Invoice query reads the full invoice total directly, giving the correct MYR figure via `HomeTotalAmt` (QB's stored exchange rate applied at invoice time).
+> **Why hosting has no cost segment:** Utility-AA costs are a lagging value — bills arrive after the period closes and do not align reliably with the Northstar revenue period. Hosting costs are reported under Others. To see hosting revenue, query Northstar invoices directly.
+>
+> **Why Invoice query for hosting revenue?** Northstar invoices contain multiple line item types. Only `Services` line items represent actual hosting revenue. `Billable Expense Income` lines are customer pass-throughs (e.g. electricity recharged) and are excluded. Sum the `Amount` field on each `Services` line and multiply by `ExchangeRate` on the invoice to get MYR.
 
 **OTHERS**
 | Type | QB Account / Pattern |
 |------|---------------------|
-| Revenue | Any revenue account NOT in Mining revenue and NOT Northstar invoices (future revenue streams) |
-| Costs | Everything else not classified as Mining or Hosting costs — normal operating expenses (Amortisation, Supplies & Materials, Maintenance fees, Commissions, Internet, Subscriptions, Bank charges, Freight & delivery, Exchange Gain/Loss, Professional fees, etc.) |
+| Revenue | Any revenue account NOT in Mining revenue (future revenue streams) |
+| Costs | Everything not classified as Mining costs — **including Utility-AA** — normal operating expenses (Utility - AA, Amortisation, Supplies & Materials, Maintenance fees, Commissions, Internet, Subscriptions, Bank charges, Freight & delivery, Exchange Gain/Loss, Professional fees, etc.) |
 
 **Accrual flagging:** Any transaction of type `Journal Entry` is marked **(accrued)** in output. Bills, Invoices, and Sales Receipts are actual — no flag.
 
@@ -140,7 +143,8 @@ Type `/` in any Slack channel or DM to see all available commands. No `@mention`
 | `/vendors` | All vendors ranked by spend, past 3 months | `/vendors past 6 months` |
 | `/summary` | Last completed month, all lines | `/summary last quarter` |
 | `/balance` | Balance sheet as of today | No params needed |
-| `/pnl` | All lines, last completed month | `/pnl hosting last quarter` |
+| `/pnl` | Mining + Others, last completed month | `/pnl mining last quarter` |
+| `/hosting` | Northstar invoice revenue, last completed month | `/hosting last quarter` |
 | `/finance` | — | `/finance what's our cash position` |
 
 ### 5.2 Command Detail
@@ -207,18 +211,19 @@ All vendors ranked by total billed. Always aggregate — no vendor filter.
 ```
 
 #### `/summary [period]`
-Top-level P&L grid split by business line. One number per cell — no line item detail.
+Top-level P&L grid for Mining and Others. One number per cell — no line item detail.
 
 ```
 /summary last quarter
 
-              Hosting       Mining        Others        Total
-Revenue       RM 353,977    RM1,676,568   —             RM2,030,545
-Costs         RM  89,663    RM  199,397   RM 12,450     RM  301,510
-Net           RM 264,314    RM1,477,171   RM -12,450    RM1,729,035
+              Mining        Others        Total
+Revenue       RM1,676,568   —             RM1,676,568
+Costs         RM  199,397   RM 102,113    RM  301,510
+Net           RM1,477,171   RM -102,113   RM1,374,058
 ```
 
 Accruals are included but not broken out. Use `/pnl` for line-item detail.
+Hosting revenue is not shown here — use `/hosting` or `/invoices Northstar`.
 
 #### `/balance`
 Balance sheet as of today. No params.
@@ -236,26 +241,8 @@ Liabilities:  RM 0
 Equity:       RM 5,080,000
 ```
 
-#### `/pnl [hosting | mining | others | all] [period]`
-Full P&L by business line with accrual flagging. Defaults to `all` + last completed month.
-
-```
-/pnl hosting last quarter
-
-━━━ HOSTING ━━━
-Revenue
-  #1009  Northstar  12.01.2026   RM113,299
-  #1010  Northstar  12.02.2026   RM119,341
-  #1011  Northstar  16.03.2026   RM121,335
-  Total Revenue                  RM353,977
-
-Costs
-  Utility - AA electricity       RM     79   (actual)
-  Utility - AA accrual           RM 89,583   (accrued)
-  Total Costs                    RM 89,663
-
-Net Hosting                      RM264,314
-```
+#### `/pnl [mining | others | all] [period]`
+Full P&L for Mining and Others with accrual flagging. Hosting is not available via `/pnl` — use `/hosting` for Northstar invoice revenue. Defaults to `all` + last completed month.
 
 ```
 /pnl mining last quarter
@@ -277,24 +264,6 @@ Net Mining                               RM1,433,171
 ```
 
 ```
-/pnl hosting last quarter
-
-━━━ HOSTING ━━━
-Revenue
-  Northstar #1009   12.01.2026   RM113,300   (actual)
-  Northstar #1010   12.02.2026   RM119,342   (actual)
-  Northstar #1011   16.03.2026   RM121,335   (actual)
-  Total Revenue                  RM353,977
-
-Costs
-  Utility - AA electricity       RM    79   (actual)
-  Utility - AA accrual           RM89,583   (accrued)
-  Total Costs                    RM89,663
-
-Net Hosting                      RM264,314
-```
-
-```
 /pnl others last quarter
 
 ━━━ OTHERS ━━━
@@ -302,6 +271,7 @@ Revenue
   (none — future revenue streams)
 
 Costs
+  Utility - AA accrual           RM 89,583   (accrued)
   Amortisation expense           RM113,638   (accrued)
   Maintenance fees               RM  6,494   (actual)
   Supplies and Materials - COGS  RM  6,457   (actual)
@@ -311,38 +281,16 @@ Costs
   Bank charges                   RM    161   (actual)
   Freight and delivery - COGS    RM     96   (actual)
   Exchange Gain or Loss          RM    -93   (actual)
-  Total Others Costs             RM128,194
+  Total Others Costs             RM217,777
 
-Net Others                       RM-128,194
+Net Others                       RM-217,777
 ```
 
-`/pnl all` shows all three blocks above followed by a combined total row.
-
-**Combined multi-line example (`/pnl mining and hosting`):**
-```
-━━━ MINING ━━━
-Revenue: MYR 191,714   Costs: MYR 243,349   Net: MYR -51,635
-
-━━━ HOSTING ━━━
-Revenue: MYR 134,960   Costs: MYR 98,253    Net: MYR 36,707
-
-Account                    Amount (MYR)   Type        % of Total
-Revenue:Realised                      0   actual           0.0%
-Revenue:Un-Realised           191,714     (accrued)      100.0%
-Utility - Nexbase             199,349     (accrued)       81.9%
-Rent or lease                  44,000     actual          18.1%
-MINING NET                    -51,635
-[blank]
-Northstar Invoice(s)          134,960     actual         100.0%
-Utility - AA                   98,253     (accrued)      100.0%
-HOSTING NET                    36,707
-[blank]
-COMBINED NET                   -14,928
-```
+`/pnl all` shows both Mining and Others blocks followed by a combined total.
 
 #### P&L Detail Table Format
 
-Every `/nb-pnl` response always shows individual line items — never a single collapsed row. Columns: **Account | Amount (MYR) | Type | % of Segment Total**
+Every `/pnl` response always shows individual line items — never a single collapsed row. Columns: **Account | Amount (MYR) | Type | % of Segment Total**
 
 **Mining example:**
 ```
@@ -355,31 +303,33 @@ Rent or lease            220,000        actual     26.2%
 Net                      -208,909
 ```
 
-**Hosting example:**
-```
-Account                  Amount (MYR)   Type       % of Total
-Northstar #1009          113,300        actual     32.0%
-Northstar #1010          119,342        actual     33.7%
-Northstar #1011          121,335        actual     34.3%
-Utility - AA             89,663         (accrued)  100.0%
-─────────────────────────────────────────────────────────
-Net                      264,314
-```
-
 **Others example:**
 ```
 Account                        Amount (MYR)  Type       % of Total
-Amortisation expense           113,638       (accrued)  88.6%
-Maintenance fees                 6,494       actual      5.1%
-Supplies and Materials - COGS    6,457       actual      5.0%
-Commissions and fees               857       actual      0.7%
-Internet                           338       actual      0.3%
-Subscriptions                      246       actual      0.2%
-Bank charges                       161       actual      0.1%
-Freight and delivery - COGS         96       actual      0.1%
-Exchange Gain or Loss              -93       actual     -0.1%
+Utility - AA                    89,663       (accrued)  41.2%
+Amortisation expense           113,638       (accrued)  52.2%
+Maintenance fees                 6,494       actual      3.0%
+Supplies and Materials - COGS    6,457       actual      3.0%
+Commissions and fees               857       actual      0.4%
+Internet                           338       actual      0.2%
 ─────────────────────────────────────────────────────────
-Net Others                    -128,194
+Net Others                    -217,447
+```
+
+#### `/hosting [period]`
+Northstar invoice revenue only. No costs — this is a revenue query, not a P&L.
+
+```
+/hosting last quarter
+
+NORTHSTAR REVENUE — Q1 2026
+
+  Invoice   Date         Amount (MYR)
+  #1009     12.01.2026   RM113,299.84
+  #1010     12.02.2026   RM119,341.84
+  #1011     16.03.2026   RM121,335.37
+  ──────────────────────────────────
+  Total                  RM353,977.05
 ```
 
 #### `/finance [anything]`
@@ -434,19 +384,17 @@ All slash commands have natural language equivalents via `@Nexbase Finance Agent
 Chain: ProfitAndLoss report + Bill query for same period. Analyst groups Bills by VendorRef.name, sums TotalAmt, ranks descending.
 
 ### 6.4 Summary Grid — 🔄 Sprint 3
-**QB API:** ProfitAndLoss report. Analyst classifies each account into Hosting / Mining / Others using account name patterns.
+**QB API:** ProfitAndLoss report. Analyst classifies accounts into Mining / Others (no Hosting column — hosting is not a P&L segment).
 
 ### 6.5 Balance Sheet — ✅ Sprint 1
 **QB API:** `GET /v3/company/{id}/reports/BalanceSheet?date=YYYY-MM-DD`
 
 ### 6.6 P&L by Business Line — 🔄 Sprint 3
-**Mining:** ProfitAndLoss report for period. Analyst segments by account classification rules (Section 2.3). Journal Entries flagged as (accrued).
+**P&L segments: Mining and Others only.** Hosting is not a P&L segment.
 
-**Hosting:** Two paired calls per period:
-1. `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y'` → analyst filters to Northstar, sums `HomeTotalAmt` for revenue
-2. ProfitAndLoss report → analyst reads `Utility - AA` for costs
+**Mining + Others:** ProfitAndLoss report for period. Accounts classified per Section 2.3. Utility-AA goes to Others. Journal Entries flagged as (accrued).
 
-For month-by-month hosting, one Invoice query + one ProfitAndLoss call per calendar month.
+**Hosting revenue (separate):** `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y'` → filter to Northstar (`CustomerRef.name` contains "NORTHSTAR"), sum `HomeTotalAmt`. No ProfitAndLoss call.
 
 ### 6.7 Large Transactions — ✅ Sprint 3
 **QB API:** `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' AND TotalAmt > 'N' ORDERBY TotalAmt DESC MAXRESULTS 100`
@@ -690,7 +638,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
   - `/summary` formatter (grid layout: Hosting / Mining / Others / Total)
   - Others drill-down: `/pnl others` → by account category, `/bills others` → by vendor
 
-**Exit criteria:** All 7 slash commands work. `/pnl hosting`, `/pnl mining`, `/pnl others`, `/pnl all` return correct segmented results with accrual flagging. Vendor clarification buttons work.
+**Exit criteria:** All 7 slash commands work. `/pnl mining`, `/pnl others`, `/pnl all` return correct segmented results with accrual flagging. `/hosting` returns Northstar Services invoice revenue. Vendor clarification buttons work.
 
 ---
 
@@ -786,6 +734,7 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 | Mar 2026 | Combined P&L uses per-account rows per section, not summary labels | "MINING REVENUE" / "HOSTING COSTS" labels are meaningless — actual QB account names give context |
 | Mar 2026 | Revenue queries always route to ProfitAndLoss, never Invoice | Mining revenue (Revenue:Realised, Un-Realised) lives in P&L accounts; routing to Invoice returns zero |
 | Mar 2026 | Hosting revenue sourced from Invoice query, not ProfitAndLoss | Northstar invoices post to multiple QB income accounts (Services, Billable Expense Income, etc.) so the P&L understates hosting revenue. Invoice query sums HomeTotalAmt giving the correct full MYR total. |
+| Mar 2026 | Hosting removed as P&L segment — revenue query only | Utility-AA costs are lagging (bills arrive after period close) so hosting cost vs revenue comparison in P&L is unreliable. Hosting = Invoice query for Northstar revenue only. Utility-AA classified under Others. P&L segments are Mining and Others only. |
 | Mar 2026 | "COMBINED NET" added to formatter row filter passthrough | Combined multi-line P&L net row was being silently stripped by business-line keyword filter |
 | Mar 2026 | max_tokens raised to 6000 | Prompt growth from detail table specs + currency rules exceeded 4000 token output budget |
 | Mar 2026 | Table rendering upgraded to Slack native `table` block | Monospace padding in section blocks broke alignment on columns with varying digit counts (e.g. MYR 1,200 vs MYR 110,000); native table block provides right-aligned numeric columns with no manual padding |

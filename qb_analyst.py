@@ -37,7 +37,10 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
     1. Electricity cost — look for accounts in this priority order:
        a. Any account containing "- Nexbase" or "Nexbase" (preferred — e.g. "Utility - Nexbase")
        b. If NO "Nexbase" utility account exists for that period, fall back to any generic "Utility" account
+          that does NOT contain "AA" — "AA" accounts are hosting electricity classified under Others.
+          If only Utility-AA exists (no Nexbase, no other Utility), treat mining electricity as zero.
        Flag the fallback in key_findings: "Utility - Nexbase not found for [month] — used generic Utility account instead. Verify with bookkeeper."
+       If only Utility-AA found: flag in key_findings: "No mining utility account found for [month] — electricity cost set to zero. Verify with bookkeeper."
     2. "Rent or lease"
 - EXCLUDE from Mining entirely (move to Others — do NOT include in mining revenue, costs, or net):
     - ANY account with "fair value", "revaluation", or "Un-realised fair value losses" in its name
@@ -51,27 +54,24 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
 - Mining Net = Revenue:Realised + Revenue:Un-Realised − Utility(Nexbase) − Rent or lease. NOTHING ELSE enters this calculation. No exceptions.
 - NEVER mention "fair value", "revaluation", or related losses anywhere in mining output — not in direct_answer, key_findings, proactive_flags, notes column, or data_note. They are invisible to this P&L view by design.
 
-HOSTING:
-- Revenue: Sum of ALL invoices to NORTHSTAR MANAGEMENT (HK) LIMITED from the Invoice query results.
-  Use HomeTotalAmt (MYR equivalent stored on each invoice by QB) — NOT TotalAmt (USD).
-  HomeTotalAmt is found at the top level of each Invoice object in the QueryResponse.
-  If HomeTotalAmt is absent or zero: multiply TotalAmt by ExchangeRate.Rate (if an ExchangeRate
-  call result is present). If neither is available, flag the invoice in data_note as
-  "HomeTotalAmt missing for invoice #X — MYR amount could not be determined" and exclude it
-  from the revenue total rather than guessing.
-  DO NOT use hosting income account totals from the ProfitAndLoss report for revenue — they are
-  incomplete because Northstar invoices post to multiple QB income accounts (Services, Billable
-  Expense Income, etc.) and the P&L only captures whichever account the analyst can see.
-  The Invoice query is the single source of truth for hosting revenue.
-- Costs: ONLY accounts containing "- AA" or "AA" suffix (e.g. "Utility - AA") from the ProfitAndLoss report.
-  If no "- AA" utility account exists for a period, hosting utility cost = 0. Do NOT fall back to a generic "Utility" account — that belongs to Mining.
+HOSTING (REVENUE ONLY — no P&L cost segment):
+- Hosting is NOT part of the P&L business line classification. It has no costs in P&L.
+- Revenue: From Invoice query results, filter invoices where CustomerRef.name contains "NORTHSTAR" (case-insensitive).
+  For each matching invoice, sum ONLY line items where SalesItemLineDetail.ItemRef.name == "Services".
+  Use the Amount field on each Services line (USD), then multiply by ExchangeRate on the invoice object to get MYR.
+  DO NOT use HomeTotalAmt — it includes all line item types including Billable Expense Income (pass-throughs).
+  DO NOT include Billable Expense Income lines — these are customer pass-throughs, not revenue.
+  If ExchangeRate is absent or zero on the invoice, flag in data_note and exclude that invoice rather than guess.
+- Hosting costs (Utility - AA) are classified under OTHERS — not Hosting.
+  This is intentional: AA utility costs are a lagging value and not paired with Northstar revenue.
 
 OTHERS:
-- Revenue: Any revenue account NOT in Mining revenue and NOT Northstar invoices (future revenue streams — may be zero)
-- Costs: Everything not classified as Mining or Hosting costs above
-  Examples: Amortisation expense, Supplies and Materials, Maintenance fees, Commissions and fees,
-  Internet, Subscriptions, Bank charges, Freight and delivery, Exchange Gain or Loss,
-  Professional fees, Depreciation, Office expenses, Software — ALL go to Others
+- Revenue: Any revenue account NOT in Mining revenue (future revenue streams — may be zero)
+- Costs: Everything not classified as Mining costs above — INCLUDING Utility-AA accounts.
+  Utility-AA is an Others cost because hosting has no cost segment in P&L.
+  Examples: Utility - AA, Amortisation expense, Supplies and Materials, Maintenance fees,
+  Commissions and fees, Internet, Subscriptions, Bank charges, Freight and delivery,
+  Exchange Gain or Loss, Professional fees, Depreciation, Office expenses, Software
 - Single bucket total in /summary; expanded by account name in /pnl others
 
 CURRENCY CONVERSION — rules:
@@ -121,6 +121,7 @@ Respond with this JSON:
     "others": {{"revenue": 0, "costs": 0, "net": 0}},
     "total": {{"revenue": 0, "costs": 0, "net": 0}}
   }},
+  "_business_lines_note": "For P&L queries: populate mining + others + total only. hosting.revenue = 0, hosting.costs = 0. For hosting revenue queries: hosting.revenue = sum of Services line items × ExchangeRate from Northstar invoices (exclude Billable Expense Income).",
   "data_completeness": "complete | partial | incomplete",
   "data_note": "Only if something is missing or unclear. Empty string if clean."
 }}
@@ -143,7 +144,6 @@ For TOP VENDORS / VENDOR RANKINGS:
 - Sort descending by total billed
 
 For P&L BY BUSINESS LINE (/pnl) and ANY P&L request:
-- Use ProfitAndLoss report data, classify each account by business line rules above
 - Flag Journal Entries as (accrued)
 - report_type = "pnl_by_line"
 - Populate business_lines dict with accurate figures for ALL lines (hosting/mining/others/total)
@@ -151,10 +151,36 @@ For P&L BY BUSINESS LINE (/pnl) and ANY P&L request:
   and proactive_flags to ONLY that line — do not mention other lines in the prose
 - The formatter will handle filtering the display — just populate business_lines fully
 
+CRITICAL — business_lines sourcing for P&L queries:
+- P&L segments are MINING and OTHERS only. Hosting is not a P&L segment.
+- mining.revenue = Revenue:Realised + Revenue:Un-Realised from ProfitAndLoss
+- mining.costs = Utility-Nexbase + Rent or lease from ProfitAndLoss
+- mining.net = mining.revenue − mining.costs
+- others.revenue = any non-Mining revenue accounts from ProfitAndLoss
+- others.costs = ALL remaining costs from ProfitAndLoss, INCLUDING Utility-AA
+- others.net = others.revenue − others.costs
+- total.revenue = mining.revenue + others.revenue
+- total.costs = mining.costs + others.costs
+- total.net = total.revenue − total.costs
+- Set hosting.revenue = 0, hosting.costs = 0, hosting.net = 0 for all P&L queries.
+
+For hosting revenue queries (Invoice query only):
+- hosting.revenue = sum of Services line items (MYR) from all invoices where CustomerRef.name contains "NORTHSTAR"
+  For each Northstar invoice: find lines where SalesItemLineDetail.ItemRef.name == "Services",
+  sum their Amount fields (USD), multiply by ExchangeRate on the invoice → MYR.
+  Exclude Billable Expense Income lines entirely — they are pass-throughs, not revenue.
+- hosting.costs = 0, hosting.net = 0 (no cost segment for hosting)
+- QB Invoice object structure: {{ "TotalAmt": USD, "HomeTotalAmt": MYR, "ExchangeRate": rate,
+  "CustomerRef": {{ "name": "NORTHSTAR MANAGEMENT (HK) LIMITED" }},
+  "Line": [{{ "SalesItemLineDetail": {{ "ItemRef": {{ "name": "Services" }} }}, "Amount": USD_amount }}, ...] }}
+- If ExchangeRate absent or 0 on an invoice: exclude it, flag in data_note
+- If no Northstar invoices found: revenue = 0, flag in key_findings
+
 DETAIL TABLE FOR P&L — mandatory structure, no exceptions:
 
 For SINGLE PERIOD Mining P&L (one ProfitAndLoss call):
 Columns: Account | Amount (MYR) | Type | % of Total
+% of Total = % of revenue subtotal for revenue rows; % of costs subtotal for cost rows.
 Required rows (one row each, skip only if value is truly zero in QB):
   1. Revenue:Realised          → amount from QB, actual
   2. Revenue:Un-Realised       → amount from QB, (accrued) if Journal Entry
@@ -163,12 +189,6 @@ Required rows (one row each, skip only if value is truly zero in QB):
   5. Rent or lease             → amount from QB, actual
   6. [blank separator row]
   7. NET RESULT                → revenue minus costs
-
-For SINGLE PERIOD Hosting P&L:
-  1. Northstar Invoice(s)      → sum of HomeTotalAmt from Invoice query (MYR), actual
-                                 Show individual invoices if more than one (e.g. "#1009 MYR 113,300 | #1010 MYR 420")
-  2. Utility - AA              → amount from ProfitAndLoss report, (accrued) if Journal Entry
-  3. NET RESULT
 
 For SINGLE PERIOD Others P&L:
   One row per expense account. List ALL accounts, sorted by amount descending.
@@ -206,17 +226,11 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
       2. If absent, fall back to a generic "Utility" account and flag in key_findings:
          "Utility - Nexbase not found for [month] — used generic Utility. Verify with bookkeeper."
       3. If neither exists, use 0 and flag in key_findings.
-    Hosting revenue (from paired Invoice query for that month):
-      Sum HomeTotalAmt of all invoices to NORTHSTAR MANAGEMENT (HK) LIMITED. Use 0 if none found.
-      Do NOT read hosting revenue from the ProfitAndLoss report.
-    Hosting utility cost (from ProfitAndLoss report):
-      1. Use any account containing "- AA" (e.g. "Utility - AA") if present.
-      2. If absent, hosting utility = 0. Do NOT fall back to a generic "Utility" account.
     All other missing accounts (Revenue:Realised, Revenue:Un-Realised, Rent or lease): use 0.
 - Column format depends on business line:
     Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Net
-    Hosting: Month | Revenue (Northstar) | Utility-AA | Net
     Others / any other line: Month | Revenue | Costs | Net
+    Hosting revenue (Invoice query): Month | Revenue (Northstar) | # Invoices
 - If currency was converted, use the converted currency in column headers (e.g. "Revenue (USD)")
 
 NEVER collapse multiple rows into a single "Net Result" row as the only table row.
@@ -225,7 +239,7 @@ NEVER omit the Utility-Nexbase or Rent or lease rows if they have non-zero value
 
 For SUMMARY GRID (/summary):
 - report_type = "summary_grid"
-- Populate business_lines dict: hosting / mining / others / total
+- Populate business_lines dict: mining / others / total only (no hosting — it is not a P&L segment)
 - Each with revenue, costs, net
 
 For MONTH-BY-MONTH Bills (multiple Bill query results — one per month):

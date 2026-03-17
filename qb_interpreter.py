@@ -146,18 +146,15 @@ Today is {today}.
 Generate a JSON plan for fetching the data needed to answer the question.
 
 DECISION RULES:
-1. Mining P&L / mining revenue → ProfitAndLoss report only.
+1. Mining P&L / mining revenue / others / all P&L / summary → ProfitAndLoss report only.
    Mining revenue = Revenue:Realised + Revenue:Un-Realised accounts in the P&L.
-   NEVER use an Invoice query for mining revenue.
+   NEVER use an Invoice query for mining or others revenue.
 
-   Hosting P&L / hosting revenue → ALWAYS chain TWO calls per period:
-     Call A: Invoice query for the period (Northstar revenue — captures full MYR across all invoice line items)
-     Call B: ProfitAndLoss report for the same period (Utility - AA costs only)
-   WHY: Northstar invoices post to multiple QB income accounts (Services, Billable Expense Income, etc.)
-   so the P&L income account totals are incomplete. The Invoice query captures the correct full MYR total.
-   The analyst filters Invoice results to NORTHSTAR MANAGEMENT (HK) LIMITED and sums HomeTotalAmt (MYR).
-
-   Summary / all lines / others → ProfitAndLoss report only.
+   Hosting revenue → Invoice query ONLY. No ProfitAndLoss call for hosting.
+   Hosting has no cost segment in P&L — Utility-AA costs are classified as Others.
+   When user asks "hosting revenue", "hosting P&L", "/pnl hosting", "/hosting", or
+   anything hosting-related: generate an Invoice query only. Do NOT add a ProfitAndLoss call.
+   "/pnl hosting" is NOT a valid P&L query — treat it as a hosting revenue Invoice query.
 2. Expense category + vendor/payee detail → Chain: ProfitAndLoss THEN Bill query
 3. Balance sheet / financial position → BalanceSheet report
 4. "Who owes us" / outstanding AR / customer invoices we sent → AgedReceivables report
@@ -204,7 +201,7 @@ DECISION RULES:
 
     By query type:
     - Mining P&L / expenses / business line → one ProfitAndLoss report per month
-    - Hosting P&L → one Invoice query + one ProfitAndLoss report per month (paired, same date range)
+    - Hosting revenue                → one Invoice query per month (no ProfitAndLoss for hosting)
     - Bills / vendor spend           → one Bill query per month (date range only, no vendor filter in SQL)
     - Invoices / AR / customer       → one Invoice query per month (date range only, no customer filter in SQL)
     - BillPayments / payments made   → one BillPayment query per month
@@ -216,13 +213,10 @@ DECISION RULES:
       {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}}
       {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}}
 
-    Example — "hosting P&L Dec 2025 to Feb 2026 breakdown by month" → 3 Invoice queries + 3 ProfitAndLoss calls (6 total):
+    Example — "hosting revenue Dec 2025 to Feb 2026 breakdown by month" → 3 Invoice queries:
       {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-12-01' AND TxnDate <= '2025-12-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
-      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-12-01", "end_date": "2025-12-31"}}}}
       {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2026-01-01' AND TxnDate <= '2026-01-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
-      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}}
       {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2026-02-01' AND TxnDate <= '2026-02-28' ORDERBY TxnDate DESC MAXRESULTS 100"}}
-      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}}
 
     Example — "bills from S And E month by month Q1 2026" → 3 Bill queries:
       {{"type": "query", "sql": "SELECT * FROM Bill WHERE TxnDate >= '2026-01-01' AND TxnDate <= '2026-01-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
@@ -256,11 +250,11 @@ Examples:
 - "all transactions over MYR 50000 this month" → Bill query with TotalAmt > 50000
 - "new vendors this quarter" → Bill query this quarter + Bill query last quarter (two calls)
 - "when did we last pay Northstar" → BillPayment query for last 6 months
-- "hosting P&L Jan 2026" → Invoice query (Jan 2026) + ProfitAndLoss (Jan 2026)
-- "hosting P&L Jan 2026 in USD" → Invoice query (Jan 2026) + ProfitAndLoss (Jan 2026) + ExchangeRate call (USD, 2026-01-31)
+- "hosting revenue Jan 2026" → Invoice query (Jan 2026) only
+- "hosting revenue Jan 2026 in USD" → Invoice query (Jan 2026) + ExchangeRate call (USD, 2026-01-31)
 - "show mining P&L in USD" → ProfitAndLoss call + ExchangeRate call (USD, last day of period)
 - "mining P&L Oct to Feb breakdown by month" → 5 separate ProfitAndLoss calls, one per month
-- "hosting P&L Oct to Feb breakdown by month" → 3 Invoice queries + 3 ProfitAndLoss calls, paired per month
+- "hosting revenue Oct to Feb breakdown by month" → 3 Invoice queries, one per month
 - "show monthly P&L last quarter" → 3 separate ProfitAndLoss calls, one per month in the quarter
 - "S And E bills month by month last quarter" → 3 separate Bill queries, one per month
 - "Northstar invoices breakdown by month Q4 2025" → 3 separate Invoice queries, one per month
