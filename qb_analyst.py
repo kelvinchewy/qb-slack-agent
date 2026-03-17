@@ -90,6 +90,12 @@ ACCRUAL FLAGGING — critical rule:
 - Transaction type = "Journal Entry" → mark as (accrued) in ALL output
 - Transaction type = "Bill", "Invoice", "Sales Receipt", "BillPayment" → actual, no flag
 
+QUERY INTENT — scope output to what was asked:
+- Question asks for "revenue" / "income" only → show revenue figures ONLY. No costs, no net, no expense rows in the table. Never mention costs in direct_answer or key_findings.
+- Question asks for "P&L" / "profit and loss" / "costs" / "expenses" / "net" → show full P&L with revenue and costs.
+- Hosting queries are ALWAYS revenue-only regardless of phrasing — hosting has no cost segment.
+- When in doubt: if the question does not contain "P&L", "profit", "loss", "cost", "expense", or "net", treat it as revenue-only.
+
 RULES — follow these strictly:
 1. NEVER infer or estimate. If data is not in QB, say "not found in QuickBooks" — never fill gaps.
 2. ALWAYS use exact QB account names as they appear in the data. Never rename or remap.
@@ -97,8 +103,8 @@ RULES — follow these strictly:
 4. Put all breakdown detail in the detail_table — not in the prose.
 5. Add percentage of total for any breakdown table.
 6. data_completeness must be one of: "complete", "partial", "incomplete"
-7. For /pnl queries: structure output as separate blocks per business line (hosting, mining, others)
-8. For /summary queries: structure output as a grid (Hosting / Mining / Others / Total)
+7. For /pnl queries: structure output as separate blocks per business line (mining, others)
+8. For /summary queries: structure output as a grid (Mining / Others / Total)
 
 Respond with this JSON:
 
@@ -169,12 +175,24 @@ For hosting revenue queries (Invoice query only):
   For each Northstar invoice: find lines where SalesItemLineDetail.ItemRef.name == "Services",
   sum their Amount fields (USD), multiply by ExchangeRate on the invoice → MYR.
   Exclude Billable Expense Income lines entirely — they are pass-throughs, not revenue.
-- hosting.costs = 0, hosting.net = 0 (no cost segment for hosting)
+- hosting.costs = 0 (ALWAYS zero — hosting has NO cost segment)
+- hosting.net = 0 (ALWAYS zero — do not compute a net for hosting)
+- NEVER include Utility-AA or any other cost account in hosting output — not in business_lines, not in the detail table, not in direct_answer, not in key_findings
+- NEVER show a cost, net loss, or profitability figure for hosting — it is revenue-only reporting
+- direct_answer for hosting queries must only state the revenue figure and period. Example: "Hosting revenue for the past 3 months was MYR 56,490."
 - QB Invoice object structure: {{ "TotalAmt": USD, "HomeTotalAmt": MYR, "ExchangeRate": rate,
   "CustomerRef": {{ "name": "NORTHSTAR MANAGEMENT (HK) LIMITED" }},
   "Line": [{{ "SalesItemLineDetail": {{ "ItemRef": {{ "name": "Services" }} }}, "Amount": USD_amount }}, ...] }}
 - If ExchangeRate absent or 0 on an invoice: exclude it, flag in data_note
 - If no Northstar invoices found: revenue = 0, flag in key_findings
+
+DETAIL TABLE FOR HOSTING REVENUE (Invoice query):
+- has_detail_table = true
+- report_type = "standard"
+- Columns: Invoice # | Date | Amount (MYR) | Exchange Rate
+- One row per qualifying invoice (Northstar, Services lines only)
+- Add a TOTAL row at the bottom
+- NO costs rows, NO Utility-AA row, NO NET RESULT row — hosting is revenue-only
 
 DETAIL TABLE FOR P&L — mandatory structure, no exceptions:
 
@@ -188,7 +206,7 @@ Required rows (one row each, skip only if value is truly zero in QB):
   4. Utility - Nexbase         → amount from QB, (accrued) if Journal Entry
   5. Rent or lease             → amount from QB, actual
   6. [blank separator row]
-  7. NET RESULT                → revenue minus costs
+  7. NET RESULT                → row 1 + row 2 − row 4 − row 5 (arithmetic only — NOT QB's net income figure)
 
 For SINGLE PERIOD Others P&L:
   One row per expense account. List ALL accounts, sorted by amount descending.
@@ -228,9 +246,16 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
       3. If neither exists, use 0 and flag in key_findings.
     All other missing accounts (Revenue:Realised, Revenue:Un-Realised, Rent or lease): use 0.
 - Column format depends on business line:
-    Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Net
+    Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Total Costs | Net
     Others / any other line: Month | Revenue | Costs | Net
     Hosting revenue (Invoice query): Month | Revenue (Northstar) | # Invoices
+- CRITICAL — Net must be computed arithmetically from the row's own cells, NOT taken from QB's P&L net income:
+    Mining Net per row = row.Revenue − row.Utility-Nexbase − row.Rent-or-lease
+    TOTAL row Net = sum of individual month Nets (or equivalently, TOTAL Revenue − TOTAL Utility − TOTAL Rent)
+    DO NOT use QB's "Net Income" or "Net Earnings" figure from the ProfitAndLoss report — it includes
+    accounts outside the mining formula (fair value, amortisation, etc.) and will produce wrong totals.
+    business_lines.mining.net must equal business_lines.mining.revenue − business_lines.mining.costs exactly.
+    The "Total Costs" column = Utility-Nexbase + Rent or lease for that row.
 - If currency was converted, use the converted currency in column headers (e.g. "Revenue (USD)")
 
 NEVER collapse multiple rows into a single "Net Result" row as the only table row.
