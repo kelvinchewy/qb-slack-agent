@@ -10,6 +10,7 @@ Takes raw QB data from qb_interpreter and produces:
 Output is structured for slack_formatter to render into Block Kit.
 """
 
+import copy
 import json
 import logging
 from datetime import datetime
@@ -29,22 +30,41 @@ Today is {today}. Currency: use whatever currency appears in QB (MYR, USD, etc) 
 BUSINESS LINES — classify every account and transaction into one of three segments:
 
 MINING:
+IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual economics of running mining machines — electricity, rent, and BTC revenue only. Fair value / revaluation accounts have been deliberately separated into their own QB accounts so they do NOT pollute operational P&L. This is an intentional accounting decision. Respect it strictly — never let revaluation bleed into the mining view.
+
 - Revenue: ONLY "Revenue:Realised" and "Revenue:Un-Realised" — nothing else
 - Costs: ONLY these two buckets:
-    1. Any account containing "- Nexbase" or "Nexbase" suffix (e.g. "Utility - Nexbase")
+    1. Electricity cost — look for accounts in this priority order:
+       a. Any account containing "- Nexbase" or "Nexbase" (preferred — e.g. "Utility - Nexbase")
+       b. If NO "Nexbase" utility account exists for that period, fall back to any generic "Utility" account
+       Flag the fallback in key_findings: "Utility - Nexbase not found for [month] — used generic Utility account instead. Verify with bookkeeper."
     2. "Rent or lease"
-- EXCLUDE from Mining entirely (move to Others):
-    - "Un-realised fair value losses" or any fair value / revaluation accounts
+- EXCLUDE from Mining entirely (move to Others — do NOT include in mining revenue, costs, or net):
+    - ANY account with "fair value", "revaluation", or "Un-realised fair value losses" in its name
+      → These are pre-annotated with [SEGMENT: Others] in the data below — treat them as Others, period.
     - Amortisation expense
     - Management fees
     - Interest expense
     - Other expenses
     - Any account not explicitly listed above
-- If an account name is not Revenue:Realised, Revenue:Un-Realised, Utility-Nexbase, or Rent or lease — it does NOT belong in Mining
+- If an account name is not Revenue:Realised, Revenue:Un-Realised, Utility/Utility-Nexbase, or Rent or lease — it does NOT belong in Mining
+- Mining Net = Revenue:Realised + Revenue:Un-Realised − Utility(Nexbase) − Rent or lease. NOTHING ELSE enters this calculation. No exceptions.
+- NEVER mention "fair value", "revaluation", or related losses anywhere in mining output — not in direct_answer, key_findings, proactive_flags, notes column, or data_note. They are invisible to this P&L view by design.
 
 HOSTING:
-- Revenue: Invoices issued to NORTHSTAR MANAGEMENT (HK) LIMITED
-- Costs: ONLY accounts containing "- AA" or "AA" suffix (e.g. "Utility - AA")
+- Revenue: Sum of ALL invoices to NORTHSTAR MANAGEMENT (HK) LIMITED from the Invoice query results.
+  Use HomeTotalAmt (MYR equivalent stored on each invoice by QB) — NOT TotalAmt (USD).
+  HomeTotalAmt is found at the top level of each Invoice object in the QueryResponse.
+  If HomeTotalAmt is absent or zero: multiply TotalAmt by ExchangeRate.Rate (if an ExchangeRate
+  call result is present). If neither is available, flag the invoice in data_note as
+  "HomeTotalAmt missing for invoice #X — MYR amount could not be determined" and exclude it
+  from the revenue total rather than guessing.
+  DO NOT use hosting income account totals from the ProfitAndLoss report for revenue — they are
+  incomplete because Northstar invoices post to multiple QB income accounts (Services, Billable
+  Expense Income, etc.) and the P&L only captures whichever account the analyst can see.
+  The Invoice query is the single source of truth for hosting revenue.
+- Costs: ONLY accounts containing "- AA" or "AA" suffix (e.g. "Utility - AA") from the ProfitAndLoss report.
+  If no "- AA" utility account exists for a period, hosting utility cost = 0. Do NOT fall back to a generic "Utility" account — that belongs to Mining.
 
 OTHERS:
 - Revenue: Any revenue account NOT in Mining revenue and NOT Northstar invoices (future revenue streams — may be zero)
@@ -145,8 +165,9 @@ Required rows (one row each, skip only if value is truly zero in QB):
   7. NET RESULT                → revenue minus costs
 
 For SINGLE PERIOD Hosting P&L:
-  1. Northstar Invoice(s)      → total invoiced, actual
-  2. Utility - AA              → amount from QB, (accrued) if Journal Entry
+  1. Northstar Invoice(s)      → sum of HomeTotalAmt from Invoice query (MYR), actual
+                                 Show individual invoices if more than one (e.g. "#1009 MYR 113,300 | #1010 MYR 420")
+  2. Utility - AA              → amount from ProfitAndLoss report, (accrued) if Journal Entry
   3. NET RESULT
 
 For SINGLE PERIOD Others P&L:
@@ -178,11 +199,24 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - Build one table row per month, sorted chronologically (oldest first)
 - Add a TOTAL row at the bottom
 - direct_answer must reference the total across all months AND call out the best/worst month
-- Notes column: flag if revenue is all unrealised, or if month has zero revenue
+- Tables contain numbers only — no Notes column. All observations (revenue composition, zero months, anomalies) go into key_findings and direct_answer prose below the table, not inside table cells.
+- MISSING ACCOUNTS — per month fallback rules (NEVER leave a cell blank; always compute Net):
+    Mining electricity cost:
+      1. Use any account containing "Nexbase" (e.g. "Utility - Nexbase") if present.
+      2. If absent, fall back to a generic "Utility" account and flag in key_findings:
+         "Utility - Nexbase not found for [month] — used generic Utility. Verify with bookkeeper."
+      3. If neither exists, use 0 and flag in key_findings.
+    Hosting revenue (from paired Invoice query for that month):
+      Sum HomeTotalAmt of all invoices to NORTHSTAR MANAGEMENT (HK) LIMITED. Use 0 if none found.
+      Do NOT read hosting revenue from the ProfitAndLoss report.
+    Hosting utility cost (from ProfitAndLoss report):
+      1. Use any account containing "- AA" (e.g. "Utility - AA") if present.
+      2. If absent, hosting utility = 0. Do NOT fall back to a generic "Utility" account.
+    All other missing accounts (Revenue:Realised, Revenue:Un-Realised, Rent or lease): use 0.
 - Column format depends on business line:
     Mining:  Month | Revenue | Utility-Nexbase | Rent or lease | Net
     Hosting: Month | Revenue (Northstar) | Utility-AA | Net
-    Others / any other line: Month | Revenue | Costs | Net | Notes
+    Others / any other line: Month | Revenue | Costs | Net
 - If currency was converted, use the converted currency in column headers (e.g. "Revenue (USD)")
 
 NEVER collapse multiple rows into a single "Net Result" row as the only table row.
@@ -328,6 +362,41 @@ def analyse(interpreter_result: dict) -> dict:
         return _fallback_analysis(question, query_complexity, str(e))
 
 
+# Keywords that identify accounts which must never appear in the Mining segment.
+# These are deliberately separated into their own QB accounts so operations
+# can review a clean P&L without revaluation noise.
+_MINING_EXCLUDED_KEYWORDS = [
+    "fair value",
+    "revaluation",
+]
+
+
+def _annotate_excluded_accounts(data: dict) -> dict:
+    """
+    Walk a ProfitAndLoss report JSON and append '[SEGMENT: Others — excluded from Mining]'
+    to the account-name field of any row whose name matches a mining-excluded keyword.
+    This gives Claude an unambiguous data-level signal, independent of the prompt.
+    Mutates data in place — caller passes transient data that is never reused.
+    """
+    def _walk(node):
+        if isinstance(node, dict):
+            # Data rows: ColData[0].value = account name
+            if node.get("type") == "Data":
+                col_data = node.get("ColData", [])
+                if col_data:
+                    name = col_data[0].get("value", "")
+                    if any(kw in name.lower() for kw in _MINING_EXCLUDED_KEYWORDS):
+                        col_data[0]["value"] = f"{name} [SEGMENT: Others — excluded from Mining]"
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(data)
+    return data
+
+
 def _build_data_context(results: list) -> str:
     """
     Convert raw QB API results into a readable context string for Claude.
@@ -379,6 +448,8 @@ def _build_data_context(results: list) -> str:
             if "start_date" in params:
                 label += f" ({params['start_date']} to {params.get('end_date', '')})"
             parts.append(f"[Call {i+1}: Report — {label}]")
+            if report_name == "ProfitAndLoss":
+                data = _annotate_excluded_accounts(data)
             raw = json.dumps(data, indent=2)
             if len(raw) > REPORT_BUDGET:
                 raw = raw[:REPORT_BUDGET] + "\n... [truncated]"

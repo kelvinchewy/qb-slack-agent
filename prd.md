@@ -2,7 +2,7 @@
 
 **Project:** QB Finance Agent
 **Owner:** Kelvin (kelvin@hashing.com)
-**Version:** 4.2
+**Version:** 4.3
 **Last Updated:** March 16, 2026
 **Status:** Sprint 3 in progress — Multi-currency, month-by-month breakdown, Business Line P&L
 
@@ -50,10 +50,12 @@ Two business lines operate under the same QuickBooks entity:
 Mining P&L shows **only** these four account types. All other accounts that appear in QB (Un-realised fair value losses, Amortisation, Management fees, Interest expense, Other expenses, etc.) are excluded from Mining and reported under Others. This keeps Mining focused on operational economics — electricity, hosting rent, and BTC revenue only.
 
 **HOSTING**
-| Type | QB Account / Pattern |
-|------|---------------------|
-| Revenue | Invoices issued to NORTHSTAR MANAGEMENT (HK) LIMITED |
-| Costs | Any account containing `- AA` or `AA` suffix (e.g. `Utility - AA`) |
+| Type | Source | QB Account / Pattern |
+|------|--------|---------------------|
+| Revenue | **Invoice query** (not P&L) | All invoices to NORTHSTAR MANAGEMENT (HK) LIMITED — sum of `HomeTotalAmt` (MYR) |
+| Costs | ProfitAndLoss report | Any account containing `- AA` or `AA` suffix (e.g. `Utility - AA`) |
+
+> **Why Invoice query for hosting revenue?** Northstar invoices contain multiple line items mapped to different QB income accounts (`Services`, `Billable Expense Income`, etc.). The P&L report aggregates by account and cannot attribute these back to Northstar — resulting in understated revenue. The Invoice query reads the full invoice total directly, giving the correct MYR figure via `HomeTotalAmt` (QB's stored exchange rate applied at invoice time).
 
 **OTHERS**
 | Type | QB Account / Pattern |
@@ -438,7 +440,13 @@ Chain: ProfitAndLoss report + Bill query for same period. Analyst groups Bills b
 **QB API:** `GET /v3/company/{id}/reports/BalanceSheet?date=YYYY-MM-DD`
 
 ### 6.6 P&L by Business Line — 🔄 Sprint 3
-**QB API:** ProfitAndLoss report for period. Analyst segments by account classification rules (Section 2.3). Journal Entries flagged as (accrued).
+**Mining:** ProfitAndLoss report for period. Analyst segments by account classification rules (Section 2.3). Journal Entries flagged as (accrued).
+
+**Hosting:** Two paired calls per period:
+1. `SELECT * FROM Invoice WHERE TxnDate >= 'X' AND TxnDate <= 'Y'` → analyst filters to Northstar, sums `HomeTotalAmt` for revenue
+2. ProfitAndLoss report → analyst reads `Utility - AA` for costs
+
+For month-by-month hosting, one Invoice query + one ProfitAndLoss call per calendar month.
 
 ### 6.7 Large Transactions — ✅ Sprint 3
 **QB API:** `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' AND TotalAmt > 'N' ORDERBY TotalAmt DESC MAXRESULTS 100`
@@ -578,7 +586,7 @@ qb-slack-agent/
 ├── qb_interpreter.py       # interpret_and_fetch() — intent → entity resolve → QB calls
 ├── qb_analyst.py           # analyse() — QB data → business line P&L → CFO narrative
 ├── report_builder.py       # Pipeline orchestrator
-├── slack_formatter.py      # Block Kit helpers
+├── slack_formatter.py      # Block Kit helpers — native table block for data tables
 ├── mock_data.py            # Mock QB responses (MOCK_MODE=true)
 ├── config.py               # Environment variable management
 ├── requirements.txt
@@ -777,8 +785,10 @@ Live QB data, HTTP `/query` endpoint, Railway token persistence, production QB c
 | Mar 2026 | Month-by-month row filter bypass in formatter | Formatter row filter designed for account-name rows; month rows ("Oct 2025") don't contain business line keywords and were being stripped |
 | Mar 2026 | Combined P&L uses per-account rows per section, not summary labels | "MINING REVENUE" / "HOSTING COSTS" labels are meaningless — actual QB account names give context |
 | Mar 2026 | Revenue queries always route to ProfitAndLoss, never Invoice | Mining revenue (Revenue:Realised, Un-Realised) lives in P&L accounts; routing to Invoice returns zero |
+| Mar 2026 | Hosting revenue sourced from Invoice query, not ProfitAndLoss | Northstar invoices post to multiple QB income accounts (Services, Billable Expense Income, etc.) so the P&L understates hosting revenue. Invoice query sums HomeTotalAmt giving the correct full MYR total. |
 | Mar 2026 | "COMBINED NET" added to formatter row filter passthrough | Combined multi-line P&L net row was being silently stripped by business-line keyword filter |
 | Mar 2026 | max_tokens raised to 6000 | Prompt growth from detail table specs + currency rules exceeded 4000 token output budget |
+| Mar 2026 | Table rendering upgraded to Slack native `table` block | Monospace padding in section blocks broke alignment on columns with varying digit counts (e.g. MYR 1,200 vs MYR 110,000); native table block provides right-aligned numeric columns with no manual padding |
 
 ---
 
