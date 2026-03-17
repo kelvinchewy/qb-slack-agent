@@ -748,27 +748,48 @@ Month-by-month breakdown was delivered ahead of schedule in Sprint 3 (`pnl_month
 
 ### Sprint 5 🔜 NEXT — Anomaly Detection + Scheduled Reports
 
-**Goal:** Proactively surface financial anomalies and push scheduled digests to Slack without anyone asking.
+**Goal:** Surface anomalies inline when users run existing commands — no separate command to remember. Add one scheduled auto-post for monthly Mining P&L.
 
-**Step 1 — Vendor spend baseline**
-- On demand: compare current period vendor spend vs same-period prior year or rolling 3-month average
-- Flag in `proactive_flags` when a vendor's bill is >2x their rolling average
-- Flag duplicate payments: same vendor + same amount within 30 days
+**Design principle:** Anomaly checks are embedded into `/nb-expenses`, `/nb-pnl`, and `/nb-invoices` responses. They appear as a dedicated block below the main table under the existing `proactive_flags` section — no new UI, no new commands. Each anomaly-enabled query fetches one additional QB call (prior 3-month comparison period), adding ~$0.015 per query to API cost.
 
-**Step 2 — P&L anomaly detection**
-- Flag any cost account that spiked >50% month-on-month
-- Flag months where Mining electricity (Utility-Nexbase) is missing entirely
-- Flag when hosting revenue drops to zero (missing Northstar invoice)
+---
 
-**Step 3 — Outstanding bills ageing**
-- Flag bills overdue >30 days in every `/nb-expenses` response (already partially live via Overdue status)
-- Add a dedicated `/nb-aged` command: buckets unpaid bills into 0–30, 31–60, 61–90, 90+ days
+**Step 1 — Inline anomaly checks on `/nb-expenses`**
 
-**Step 4 — Scheduled Slack digests (APScheduler)**
-- Monday 9AM SGT → weekly summary to `#ask-finance`: cash position + top 3 unpaid bills + any anomaly flags
-- 1st of month, 10AM SGT → previous month P&L (Mining + Others) posted automatically
+When expenses are fetched, the interpreter also fetches the prior 3 months of bills for the same vendor(s). The analyst compares and flags in `proactive_flags`:
+- Vendor spend this period is >2× their 3-month rolling average → flag with amounts
+- Same vendor, same amount appears within 30 days → flag as possible duplicate
+- A vendor that appeared every month for 3+ months is now missing → flag
 
-**Exit criteria:** Anomaly flags appear in `proactive_flags` on relevant queries. `/nb-aged` works. Weekly + monthly digests post to `#ask-finance` on schedule.
+**Step 2 — Inline anomaly checks on `/nb-pnl`**
+
+When a P&L is fetched, the interpreter also fetches the prior month's P&L. The analyst compares and flags:
+- Any cost account spiked >50% vs prior month → flag with delta
+- Utility-Nexbase is missing for the current month → flag (may indicate missing accrual entry)
+- Hosting revenue is zero → flag if prior months had Northstar invoices
+
+**Step 3 — Inline anomaly checks on `/nb-invoices`**
+
+When invoices are fetched, the interpreter fetches prior 3 months for comparison. The analyst flags:
+- No Northstar invoice this month when prior months had one → flag with days since last invoice
+- Invoice total for a customer is significantly higher or lower than their average
+
+**Step 4 — Scheduled Mining P&L digest (APScheduler)**
+
+Auto-posts previous month Mining P&L to `#ask-finance` on the **3rd working day of each month**, 9AM SGT.
+- Uses the existing pipeline: `interpret_and_fetch` → `analyse` → `format_dynamic_analysis` → `chat_postMessage`
+- 3rd working day = skip Sat/Sun from the 1st of the month (no public holiday logic needed)
+- No new dependencies except adding `APScheduler` to `requirements.txt`
+- Scheduler runs inside the existing Railway process alongside Bolt + Flask
+
+**API cost impact of Sprint 5:**
+- `/nb-expenses` with anomaly: +1 QB call, ~+$0.015/query
+- `/nb-pnl` with anomaly: +1 QB call, ~+$0.015/query
+- `/nb-invoices` with anomaly: +1 QB call, ~+$0.015/query
+- Cron job: 1 query/month ≈ negligible
+- Revised monthly estimate: **$25–55/month** at moderate usage
+
+**Exit criteria:** `proactive_flags` section shows anomaly findings on `/nb-expenses`, `/nb-pnl`, `/nb-invoices` when anomalies exist (empty when clean). Monthly Mining P&L posts automatically to `#ask-finance` on the 3rd working day.
 
 ---
 
