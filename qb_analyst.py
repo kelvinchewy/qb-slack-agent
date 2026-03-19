@@ -58,14 +58,20 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
 - Mining Net = Revenue:Realised + Revenue:Un-Realised − Utility(Nexbase) − Rent or lease. NOTHING ELSE enters this calculation. No exceptions.
 - NEVER mention "fair value", "revaluation", or related losses anywhere in mining output — not in direct_answer, key_findings, proactive_flags, notes column, or data_note. They are invisible to this P&L view by design.
   MTM MODE EXCEPTION: If the user's query explicitly contains "mark to market", "mtm", or "fair value adjustment", activate MTM mode. MTM mode is used for quarterly/half-yearly BTC valuation reviews. In MTM mode:
-  - Compute the standard mining table and NET RESULT identically (no change to those rows).
-  - Additionally, sum ALL QB accounts whose name contains "fair value", "revaluation", or "Un-realised fair value" — this is the Fair Adjustment. Positive = gain, negative = loss.
-  - After the NET RESULT row, add a blank separator, then:
-      Fair Adjustment  → the fair value amount (gain is positive, loss is negative)
-      NET ADJUSTMENT   → NET RESULT + Fair Adjustment
-  - Populate business_lines.mining.fair_adjustment and business_lines.mining.net_adjustment.
+  - Compute the standard mining table and NET RESULT identically — no changes to those rows.
+  - Do NOT add Fair Adjustment or NET ADJUSTMENT rows to detail_table. The formatter renders them as a separate section below the table.
+  - Sum ALL QB accounts whose name contains "fair value", "revaluation", or "Un-realised fair value" → fair_adjustment total. Positive = gain, negative = loss.
+  - Populate:
+      business_lines.mining.fair_adjustment  = period total of all fair value accounts
+      business_lines.mining.net_adjustment   = business_lines.mining.net + fair_adjustment
+      business_lines.mining.fair_adjustment_rows = for MONTHLY queries only — array of
+        [month_label, fair_adj_amount, net_adj_amount] for each month where fair_adj_amount ≠ 0,
+        plus a final ["TOTAL", total_fair_adj, total_net_adj] row.
+        Skip months with zero fair adjustment entirely.
+        Set to [] (empty array) if no month has a non-zero fair adjustment.
+        Example: [["Jun 2025", -100000, -50000], ["Dec 2025", -266324, -393759], ["TOTAL", -366324, -443759]]
   - In direct_answer: lead with NET RESULT, then state the Fair Adjustment and NET ADJUSTMENT.
-  - In MTM mode ONLY, you may mention fair value / revaluation in direct_answer and key_findings — but only in the context of the Fair Adjustment row. Never let it bleed into NET RESULT.
+  - In MTM mode ONLY, you may mention fair value / revaluation in direct_answer and key_findings — never let it bleed into NET RESULT.
 
 HOSTING (REVENUE ONLY — no P&L cost segment):
 - Hosting is NOT part of the P&L business line classification. It has no costs in P&L.
@@ -136,7 +142,7 @@ Respond with this JSON:
   }},
   "business_lines": {{
     "hosting": {{"revenue": 0, "costs": 0, "net": 0}},
-    "mining": {{"revenue": 0, "costs": 0, "net": 0, "fair_adjustment": 0, "net_adjustment": 0}},
+    "mining": {{"revenue": 0, "costs": 0, "net": 0, "fair_adjustment": 0, "net_adjustment": 0, "fair_adjustment_rows": []}},
     "others": {{"revenue": 0, "costs": 0, "net": 0}},
     "total": {{"revenue": 0, "costs": 0, "net": 0}}
   }},
@@ -263,10 +269,8 @@ Required rows (one row each, skip only if value is truly zero in QB):
      NEVER use QB's "Net Income", "Net Earnings", or any P&L summary total for this row.
      If Utility row used the fallback account, NET RESULT must still deduct that fallback amount.
      ARITHMETIC SELF-CHECK (mandatory): after writing NET RESULT, re-verify it: (row 1 value) + (row 2 value) − (row 4 value) − (row 5 value). If your NET RESULT matches QB's own "Net Income" field in the raw data, that is a sign of error — QB's Net Income includes fair value, amortisation, and other excluded accounts. Recompute from the four rows only.
-  [MTM mode only — skip these rows if not MTM]:
-  8. [blank separator row]
-  9. Fair Adjustment            → sum of ALL accounts with "fair value", "revaluation", or "Un-realised fair value" in their name
- 10. NET ADJUSTMENT             → row 7 + row 9
+  [MTM mode: do NOT add rows 8-10 to the detail_table — the formatter renders Fair Adjustment
+   and NET ADJUSTMENT as a separate section using business_lines.mining fields.]
 
 For SINGLE PERIOD Others P&L:
   One row per expense account. List ALL accounts, sorted by amount descending.
@@ -310,11 +314,13 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
       3. If no qualifying utility account found at all: use 0, flag in key_findings.
     All other missing accounts (Revenue:Realised, Revenue:Un-Realised, Rent or lease): use 0.
 - Column format depends on business line:
-    Mining (standard):  Month | Revenue | Utility-Nexbase | Rent or lease | Total Costs | Net
-    Mining (MTM mode):  Month | Revenue | Utility-Nexbase | Rent or lease | Total Costs | Net | Fair Adj | Net Adj
-      Fair Adj per month = sum of fair value/revaluation accounts for that month (0 if none)
-      Net Adj per month  = Net + Fair Adj for that row; TOTAL row = sum of individual Net Adj values
+    Mining (standard or MTM):  Month | Revenue | Utility-Nexbase | Rent or lease | Total Costs | Net
+      MTM mode: same columns — Fair Adjustment detail goes into business_lines.mining.fair_adjustment_rows, not the main table.
     Others / any other line: Month | Revenue | Costs | Net
+- CELL FORMATTING — month-by-month tables: write all numeric cell values as plain numbers with commas only.
+    Correct:   191,714   or   -88,538   or   0
+    Wrong:     MYR 191,714   or   MYR -88,538
+    Do NOT prefix any cell with a currency code. Currency belongs in column headers only (e.g. "Revenue (MYR)") or is implied.
     Hosting revenue (Invoice query): Month | Revenue (USD) | # Invoices
       *** HOSTING MONTH-BY-MONTH HAS NO COSTS COLUMN, NO NET COLUMN, NO UTILITY-AA COLUMN ***
       *** DO NOT add any cost or net columns to the hosting table — it is revenue-only ***

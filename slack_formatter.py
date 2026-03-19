@@ -196,21 +196,11 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
                 continue
             net_sign = "+" if net >= 0 else ""
             blocks.append(divider())
-            summary = (
+            blocks.append(section(
                 f"*{label}*\n"
                 f"Revenue: `{currency} {rev:,.0f}`   Costs: `{currency} {costs:,.0f}`   "
                 f"Net: `{net_sign}{currency} {net:,.0f}`"
-            )
-            fair_adj = line.get("fair_adjustment", 0)
-            net_adj = line.get("net_adjustment", 0)
-            if fair_adj or net_adj:
-                fair_sign = "+" if fair_adj >= 0 else ""
-                nadj_sign = "+" if net_adj >= 0 else ""
-                summary += (
-                    f"\nFair Adj: `{fair_sign}{currency} {fair_adj:,.0f}`   "
-                    f"Net Adj: `{nadj_sign}{currency} {net_adj:,.0f}`"
-                )
-            blocks.append(section(summary))
+            ))
 
         # Only show combined total when showing all lines
         if show_all:
@@ -258,6 +248,11 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
             blocks.append(divider())
             blocks.extend(_render_table(hdrs, rows))
 
+    # MTM adjustment section (single-period)
+    if show_mining and business_lines:
+        mining = business_lines.get("mining", {})
+        blocks.extend(_render_mtm_section(mining, currency))
+
     if key_findings:
         blocks.append(divider())
         # Filter findings to relevant line only
@@ -303,6 +298,11 @@ def _format_pnl_monthly(analysis: dict) -> list[dict]:
         if hdrs and rows:
             blocks.append(divider())
             blocks.extend(_render_table(hdrs, rows))
+
+    # MTM adjustment section (monthly)
+    if business_lines:
+        mining = business_lines.get("mining", {})
+        blocks.extend(_render_mtm_section(mining, currency))
 
     if business_lines:
         total = business_lines.get("total")
@@ -364,6 +364,40 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
 
     blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
     blocks.append(_footer_block(data_completeness, data_note))
+    return blocks
+
+
+def _render_mtm_section(mining: dict, currency: str) -> list[dict]:
+    """
+    Renders Fair Adjustment + NET ADJUSTMENT as a separate preformatted block.
+    For monthly queries: shows a per-month breakdown table (only months with non-zero adjustment).
+    For single-period queries: shows a simple 2-row summary.
+    Returns [] if no adjustment data is present.
+    """
+    fair_adj = mining.get("fair_adjustment", 0)
+    net_adj = mining.get("net_adjustment", 0)
+    if not fair_adj and not net_adj:
+        return []
+
+    blocks = [divider()]
+    fair_adj_rows = mining.get("fair_adjustment_rows") or []
+
+    if fair_adj_rows:
+        # Monthly — show per-month breakdown + total
+        headers = ["Month", f"Fair Adjustment ({currency})", f"Net Adjustment ({currency})"]
+        rows = [
+            [r[0], f"{r[1]:+,.0f}" if r[1] != 0 else "0", f"{r[2]:+,.0f}" if r[2] != 0 else "0"]
+            for r in fair_adj_rows
+        ]
+        blocks.extend(_render_table(headers, rows))
+    else:
+        # Single period — simple 2-row summary
+        rows = [
+            ["Fair Adjustment", f"{fair_adj:+,.0f}"],
+            ["NET ADJUSTMENT",  f"{net_adj:+,.0f}"],
+        ]
+        blocks.extend(_render_table(["", f"Amount ({currency})"], rows))
+
     return blocks
 
 
