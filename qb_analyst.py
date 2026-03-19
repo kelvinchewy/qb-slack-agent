@@ -340,6 +340,21 @@ For MONTH-BY-MONTH BillPayments (multiple BillPayment query results — one per 
 - Add TOTAL row at bottom
 - No Notes column — observations go in key_findings prose
 
+ANOMALY DETECTION — populate proactive_flags with genuine issues only. Empty list if everything looks normal.
+
+For P&L queries (/nb-pnl):
+- Utility-Nexbase is missing or zero for the period → flag: "No electricity cost recorded for [period] — accrual entry may be missing. Verify with bookkeeper."
+- Mining revenue (Revenue:Realised + Revenue:Un-Realised) is zero → flag: "No mining revenue recorded for [period]."
+
+For Invoice queries (/nb-invoices):
+- No Northstar invoice found in the period → flag: "No hosting invoice from Northstar in [period] — check if billing was raised."
+- Two or more invoices to the same customer with identical TotalAmt in the same period → flag: "Possible duplicate invoice — [Customer] has [N] invoices for [Amount] in [period]."
+
+Rules:
+- Only flag when the data clearly shows a problem. Do not flag speculatively.
+- Keep each flag to one sentence — specific, actionable, no jargon.
+- Never flag things that are expected (e.g. zero Un-Realised revenue is normal in some months).
+
 For CHAINED CALLS (P&L + Bill together):
 - Use P&L for category totals
 - Scan Bill line items for matching account names

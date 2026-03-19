@@ -15,11 +15,15 @@ HTTP endpoints:
   POST /query      — agent-to-agent query, requires X-API-Key header
 """
 
+import calendar
 import logging
 import os
 import re
 import threading
 import time
+from datetime import date
+
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask import Flask, request, jsonify
 from slack_bolt import App
@@ -29,6 +33,7 @@ from config import Config
 from orchestrator import classify_intent
 from report_builder import build_report
 from qb_interpreter import interpret_and_fetch, warm_cache, refresh_entity_cache
+from slack_formatter import format_dynamic_analysis
 from qb_analyst import analyse
 
 logging.basicConfig(
@@ -622,6 +627,58 @@ def query():
         return jsonify({"error": "Internal error processing query.", "status": "error"}), 500
 
 
+# ── Scheduled Reports ──────────────────────────────────────────────────────
+
+def _third_working_day(year: int, month: int) -> int:
+    """Return the day-of-month of the 3rd Mon–Fri in the given month."""
+    count = 0
+    for day in range(1, calendar.monthrange(year, month)[1] + 1):
+        if date(year, month, day).weekday() < 5:  # Mon=0 … Fri=4
+            count += 1
+            if count == 3:
+                return day
+    return 3  # fallback — should never be reached
+
+
+def _post_monthly_pnl():
+    """Auto-post previous month Mining P&L to #ask-finance."""
+    channel = os.environ.get("SLACK_FINANCE_CHANNEL", "")
+    if not channel:
+        logger.warning("SLACK_FINANCE_CHANNEL not set — skipping monthly P&L post")
+        return
+    logger.info("📅 Running scheduled monthly Mining P&L post...")
+    try:
+        interpreter_result = interpret_and_fetch("mining P&L for last month")
+        analysis = analyse(interpreter_result)
+        blocks = format_dynamic_analysis(analysis)
+        slack_app.client.chat_postMessage(channel=channel, blocks=blocks,
+                                          text="📅 Monthly Mining P&L")
+        logger.info("✅ Monthly Mining P&L posted to #ask-finance")
+    except Exception as e:
+        logger.error(f"Monthly P&L post failed: {e}")
+
+
+def _schedule_monthly_pnl(scheduler: BackgroundScheduler):
+    """
+    Schedule a daily 9AM SGT check; posts the P&L only on the 3rd working day of each month.
+    Using a cron trigger avoids rescheduling from within a job callback.
+    """
+    def _daily_check():
+        today = date.today()
+        if today.day == _third_working_day(today.year, today.month):
+            threading.Thread(target=_post_monthly_pnl, daemon=True).start()
+
+    scheduler.add_job(
+        _daily_check,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        id="monthly_pnl_check",
+        replace_existing=True,
+    )
+    logger.info("📅 Monthly P&L checker scheduled daily at 09:00 SGT")
+
+
 # ── Startup ────────────────────────────────────────────────────────────────
 
 def _startup_tasks():
@@ -680,6 +737,11 @@ if __name__ == "__main__":
     # Run startup tasks in background (token check + cache warm)
     threading.Thread(target=_startup_tasks, daemon=True).start()
 
+    # Start APScheduler for monthly P&L digest
+    scheduler = BackgroundScheduler(timezone="Asia/Singapore")
+    scheduler.start()
+    _schedule_monthly_pnl(scheduler)
+
     # Retry loop: if auth.test times out on first attempt (Railway network not yet
     # fully ready), wait and retry rather than crashing into a Railway restart loop.
     # First attempt is immediate — no artificial sleep — to minimise the dark window
@@ -693,6 +755,7 @@ if __name__ == "__main__":
             break
         except KeyboardInterrupt:
             logger.info("Shutting down.")
+            scheduler.shutdown(wait=True)
             sys.exit(0)
         except Exception as e:
             if attempt < MAX_SOCKET_ATTEMPTS:
@@ -701,4 +764,5 @@ if __name__ == "__main__":
                 time.sleep(wait)
             else:
                 logger.error(f"Socket Mode failed after {MAX_SOCKET_ATTEMPTS} attempts. Exiting.")
+                scheduler.shutdown(wait=False)
                 sys.exit(1)
