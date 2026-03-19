@@ -61,12 +61,17 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
   - Compute the standard mining table and NET RESULT identically — no changes to those rows.
   - Do NOT add Fair Adjustment or NET ADJUSTMENT rows to detail_table. The formatter renders them as a separate section below the table.
   - Sum ALL QB accounts whose name contains "fair value", "revaluation", or "Un-realised fair value" → fair_adjustment total. Positive = gain, negative = loss.
-  - Populate:
+  - Populate (ALL values must be consistent with the detail_table — compute from the same source numbers):
       business_lines.mining.fair_adjustment  = period total of all fair value accounts
-      business_lines.mining.net_adjustment   = business_lines.mining.net + fair_adjustment
+      business_lines.mining.net             = detail_table TOTAL row Net column (NOT re-derived independently)
+      business_lines.mining.net_adjustment   = business_lines.mining.net + business_lines.mining.fair_adjustment
       business_lines.mining.fair_adjustment_rows = for MONTHLY queries only — array of
         [month_label, fair_adj_amount, net_adj_amount] for each month where fair_adj_amount ≠ 0,
         plus a final ["TOTAL", total_fair_adj, total_net_adj] row.
+        - net_adj_amount per month = that month's Net column from detail_table + fair_adj_amount
+        - total_net_adj in TOTAL row = detail_table TOTAL row Net + total_fair_adj
+          (equivalently: sum of all per-month net_adj_amount values)
+        - SELF-CHECK: total_net_adj must equal business_lines.mining.net_adjustment
         Skip months with zero fair adjustment entirely.
         Set to [] (empty array) if no month has a non-zero fair adjustment.
         Example: [["Jun 2025", -100000, -50000], ["Dec 2025", -266324, -393759], ["TOTAL", -366324, -443759]]
@@ -124,6 +129,10 @@ RULES — follow these strictly:
 6. data_completeness must be one of: "complete", "partial", "incomplete"
 7. For /pnl queries: structure output as separate blocks per business line (mining, others)
 8. For /summary queries: structure output as a grid (Mining / Others / Total)
+9. TABLE IS THE SOURCE OF TRUTH — any figure (amount, percentage, net, total) mentioned in
+   direct_answer, key_findings, or proactive_flags MUST be read directly from the detail_table
+   or business_lines dict. Never re-derive or re-compute independently — rounding differences
+   will cause the prose to contradict the table. If the table shows 75.2%, write 75.2% in prose.
 
 Respond with this JSON:
 
@@ -220,6 +229,8 @@ CRITICAL — business_lines sourcing for P&L queries:
 - mining.revenue = Revenue:Realised + Revenue:Un-Realised from ProfitAndLoss
 - mining.costs = Utility-Nexbase + Rent or lease from ProfitAndLoss
 - mining.net = mining.revenue − mining.costs
+  For MONTHLY queries: mining.net must equal the TOTAL row Net column in the detail_table.
+  Do NOT re-derive mining.net independently — read it from the computed TOTAL row to guarantee consistency.
 - others.revenue = any non-Mining revenue accounts from ProfitAndLoss
 - others.costs = ALL remaining costs from ProfitAndLoss, INCLUDING Utility-AA
 - others.net = others.revenue − others.costs

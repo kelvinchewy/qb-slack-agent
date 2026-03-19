@@ -11,6 +11,7 @@ Never use SQL Purchase queries to look for expense categories.
 import json
 import logging
 import re
+import time
 from datetime import datetime
 import anthropic
 from config import Config
@@ -626,22 +627,28 @@ def _execute_calls(plan: dict) -> list:
     results = [None] * len(calls)
 
     def _execute_one(idx: int, call: dict):
-        try:
-            if call["type"] == "report":
-                params = {**call.get("params", {}), "minorversion": "65"}
-                data = qb_agent.get_report(call["report_name"], params)
-                return idx, {"call": call, "data": data, "error": None}
-            elif call["type"] == "query":
-                data = qb_agent.query(call["sql"])
-                return idx, {"call": call, "data": data, "error": None}
-            elif call["type"] == "exchangerate":
-                data = qb_agent.get_exchange_rate(call["source_currency"], call["as_of_date"])
-                return idx, {"call": call, "data": data, "error": None}
-            else:
-                return idx, {"call": call, "data": None, "error": f"Unknown call type: {call['type']}"}
-        except Exception as e:
-            logger.error(f"QB call failed: {call} — {e}")
-            return idx, {"call": call, "data": None, "error": str(e)}
+        last_error = None
+        for attempt in range(2):  # 1 attempt + 1 retry on failure
+            try:
+                if call["type"] == "report":
+                    params = {**call.get("params", {}), "minorversion": "65"}
+                    data = qb_agent.get_report(call["report_name"], params)
+                    return idx, {"call": call, "data": data, "error": None}
+                elif call["type"] == "query":
+                    data = qb_agent.query(call["sql"])
+                    return idx, {"call": call, "data": data, "error": None}
+                elif call["type"] == "exchangerate":
+                    data = qb_agent.get_exchange_rate(call["source_currency"], call["as_of_date"])
+                    return idx, {"call": call, "data": data, "error": None}
+                else:
+                    return idx, {"call": call, "data": None, "error": f"Unknown call type: {call['type']}"}
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    logger.warning(f"QB call failed (attempt 1), retrying in 3s: {e}")
+                    time.sleep(3)
+        logger.error(f"QB call failed after 2 attempts: {call} — {last_error}")
+        return idx, {"call": call, "data": None, "error": str(last_error)}
 
     with ThreadPoolExecutor(max_workers=min(len(calls), 5)) as executor:
         futures = [executor.submit(_execute_one, i, call) for i, call in enumerate(calls)]
