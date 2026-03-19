@@ -129,10 +129,16 @@ RULES — follow these strictly:
 6. data_completeness must be one of: "complete", "partial", "incomplete"
 7. For /pnl queries: structure output as separate blocks per business line (mining, others)
 8. For /summary queries: structure output as a grid (Mining / Others / Total)
-9. TABLE IS THE SOURCE OF TRUTH — any figure (amount, percentage, net, total) mentioned in
-   direct_answer, key_findings, or proactive_flags MUST be read directly from the detail_table
-   or business_lines dict. Never re-derive or re-compute independently — rounding differences
-   will cause the prose to contradict the table. If the table shows 75.2%, write 75.2% in prose.
+9. TABLE IS THE SOURCE OF TRUTH — strict two-step sequencing required:
+   STEP 1: Build detail_table completely. Compute all amounts, % of Total, and NET RESULT.
+   STEP 2: Write direct_answer, key_findings, and proactive_flags by COPYING values from
+           the completed table — do NOT recompute, round differently, or recalculate subtotals.
+   Specific binding:
+   - % figures in prose MUST exactly match the % of Total column in the table.
+     If the table shows 82.9%, write "82.9%". Never say "84%" or "83%" when the table says "82.9%".
+   - Amount figures in prose MUST match the Amount column in the table (same rounding).
+   - NET RESULT in prose MUST match the NET RESULT row in the table.
+   Violation example: table shows "Utility: 82.9%" → writing "84% of costs" in key_findings is wrong.
 
 Respond with this JSON:
 
@@ -268,6 +274,7 @@ DETAIL TABLE FOR P&L — mandatory structure, no exceptions:
 For SINGLE PERIOD Mining P&L (one ProfitAndLoss call):
 Columns: Account | Amount (MYR) | Type | % of Total
 % of Total = % of revenue subtotal for revenue rows; % of costs subtotal for cost rows.
+Once computed and written into the table row, this value is FINAL — copy it exactly into any prose. Do not recalculate.
 Required rows (one row each, skip only if value is truly zero in QB):
   1. Revenue:Realised          → amount from QB, actual
   2. Revenue:Un-Realised       → amount from QB, (accrued) if Journal Entry
