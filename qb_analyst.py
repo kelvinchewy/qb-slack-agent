@@ -75,7 +75,12 @@ IMPORTANT CONTEXT: The mining P&L is used by operations to review the actual eco
         Skip months with zero fair adjustment entirely.
         Set to [] (empty array) if no month has a non-zero fair adjustment.
         Example: [["Jun 2025", -100000, -50000], ["Dec 2025", -266324, -393759], ["TOTAL", -366324, -443759]]
-  - In direct_answer: lead with NET RESULT, then state the Fair Adjustment and NET ADJUSTMENT.
+  - In direct_answer for MTM mode — copy EXACT values from business_lines.mining fields, do NOT recompute:
+      NET RESULT figure = business_lines.mining.net (= TOTAL Net from detail_table)
+      Fair Adjustment   = business_lines.mining.fair_adjustment
+      NET ADJUSTMENT    = business_lines.mining.net_adjustment
+      Best/worst month figures = copied from the Net column in detail_table rows
+    Example: "Mining NET RESULT for 2025 was MYR 164,952, with a Fair Adjustment of MYR -266,324 giving a NET ADJUSTMENT of MYR -101,372. December was the worst month at MYR -127,435."
   - In MTM mode ONLY, you may mention fair value / revaluation in direct_answer and key_findings — never let it bleed into NET RESULT.
 
 HOSTING (REVENUE ONLY — no P&L cost segment):
@@ -526,6 +531,10 @@ def analyse(interpreter_result: dict) -> dict:
         analysis.setdefault("business_lines", None)
         analysis.setdefault("currency", "MYR")
 
+        # Fix arithmetic: LLM often uses QB's pre-computed Net Income instead of row arithmetic.
+        # Post-processor recomputes NET RESULT and TOTAL rows from the actual table data.
+        _fix_pnl_arithmetic(analysis)
+
         logger.info(f"Analysis complete. Type: {analysis.get('report_type')} | Complexity: {query_complexity} | Flags: {len(analysis.get('proactive_flags', []))}")
         return analysis
 
@@ -647,3 +656,171 @@ def _fallback_analysis(question: str, complexity: str, error_msg: str) -> dict:
         "data_note": error_msg,
         "error": error_msg,
     }
+
+
+# ---------------------------------------------------------------------------
+# P&L arithmetic post-processor
+# The LLM reliably identifies account names and amounts from QB data but
+# frequently mis-computes derived totals (NET RESULT, TOTAL row) by drifting
+# toward QB's pre-computed Net Income or annual aggregates.
+# These functions recompute all derived values from the actual table row data
+# so the math is always correct, regardless of what the LLM computed.
+# ---------------------------------------------------------------------------
+
+def _parse_amount(s) -> float:
+    """Parse cell values like '1,234,567', '-88,538', '+164,952', '(88,538)', 'MYR 1,234' to float."""
+    s = str(s).strip().replace("MYR", "").replace(",", "").replace("+", "").strip()
+    # Accounting parentheses notation: (88538) → -88538
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    if not s or s in ("-", "—", "–", ""):
+        return 0.0
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _fmt_int(v: float) -> str:
+    """Format as plain comma-separated integer (no currency prefix)."""
+    return f"{int(round(v)):,}"
+
+
+def _fix_pnl_arithmetic(analysis: dict) -> None:
+    """
+    Recompute NET RESULT and TOTAL rows from actual table data.
+    Mutates analysis in place. Only acts on pnl_by_line and pnl_monthly.
+    """
+    report_type = analysis.get("report_type")
+    dt = analysis.get("detail_table")
+    if not dt or report_type not in ("pnl_by_line", "pnl_monthly"):
+        return
+
+    headers = dt.get("headers") or []
+    rows = dt.get("rows") or []
+    bl = analysis.get("business_lines") or {}
+    mining = bl.get("mining") or {}
+
+    if report_type == "pnl_monthly":
+        _fix_monthly_totals(headers, rows, mining)
+    elif report_type == "pnl_by_line":
+        _fix_single_period_net(headers, rows, mining)
+
+    # Always store mining back to bl — covers the case where bl["mining"] didn't exist
+    bl["mining"] = mining
+
+    # After fixing mining.net, recompute MTM net_adjustment
+    fair_adj = mining.get("fair_adjustment") or 0
+    if fair_adj and "net" in mining:
+        new_net_adj = mining["net"] + fair_adj
+        mining["net_adjustment"] = new_net_adj
+        # Fix TOTAL row in fair_adjustment_rows if present
+        far = mining.get("fair_adjustment_rows") or []
+        if far and str(far[-1][0]).upper() == "TOTAL":
+            far[-1][2] = new_net_adj
+
+    # Recompute total business_lines from fixed mining + existing others
+    others = bl.get("others") or {}
+    if "revenue" in mining:
+        total = bl.get("total") or {}
+        total["revenue"] = (mining.get("revenue") or 0) + (others.get("revenue") or 0)
+        total["costs"] = (mining.get("costs") or 0) + (others.get("costs") or 0)
+        total["net"] = total["revenue"] - total["costs"]
+        bl["total"] = total
+
+    analysis["business_lines"] = bl
+    logger.debug(
+        f"Arithmetic fix applied ({report_type}): "
+        f"rev={mining.get('revenue')}, costs={mining.get('costs')}, net={mining.get('net')}"
+    )
+
+
+def _fix_monthly_totals(headers: list, rows: list, mining: dict) -> None:
+    """Recompute TOTAL row in a monthly P&L table from individual month rows."""
+    def col(keyword):
+        kw = keyword.lower()
+        for i, h in enumerate(headers):
+            if kw in str(h).lower():
+                return i
+        return None
+
+    rev_i = col("revenue")
+    util_i = col("utilit")
+    rent_i = col("rent")
+    costs_i = col("total costs")
+    net_i = col("net")
+
+    data_rows, total_row = [], None
+    for row in rows:
+        if not row:
+            continue
+        label = str(row[0]).strip().upper()
+        if label == "TOTAL":
+            total_row = row
+        elif label:
+            data_rows.append(row)
+
+    if not data_rows or total_row is None:
+        return
+
+    def s(idx):
+        if idx is None:
+            return 0.0
+        return sum(_parse_amount(r[idx]) for r in data_rows if len(r) > idx)
+
+    rev = s(rev_i)
+    util = s(util_i)
+    rent = s(rent_i)
+    costs = util + rent
+    net = s(net_i)  # Sum month-by-month Net column (avoids compounding any per-row rounding errors)
+
+    def fix(idx, val):
+        if idx is not None and len(total_row) > idx:
+            total_row[idx] = _fmt_int(val)
+
+    fix(rev_i, rev)
+    fix(util_i, util)
+    fix(rent_i, rent)
+    fix(costs_i, costs)
+    fix(net_i, net)
+
+    mining.update({"revenue": rev, "costs": costs, "net": net})
+
+
+def _fix_single_period_net(headers: list, rows: list, mining: dict) -> None:
+    """Recompute NET RESULT in a single-period P&L table from Revenue and Cost rows."""
+    amt_i = next((i for i, h in enumerate(headers) if "Amount" in str(h)), 1)
+
+    NET_LABELS = {"NET RESULT", "MINING NET", "OTHERS NET", "COMBINED NET"}
+
+    # Find the MINING NET row index to scope mining-only rows in a combined P&L
+    mining_net_idx = next(
+        (i for i, r in enumerate(rows) if r and str(r[0]).strip().upper() == "MINING NET"),
+        None,
+    )
+    target_rows = rows[:mining_net_idx] if mining_net_idx is not None else rows
+
+    rev, costs = 0.0, 0.0
+    for row in target_rows:
+        if not row or all(str(c).strip() == "" for c in row):
+            continue
+        label = str(row[0]).strip()
+        if not label or label.upper() in NET_LABELS:
+            continue
+        if len(row) <= amt_i:
+            continue
+        v = _parse_amount(row[amt_i])
+        if label.startswith("Revenue:") or label.lower().startswith("revenue "):
+            rev += v
+        else:
+            costs += v
+
+    net = rev - costs
+
+    # Fix the NET RESULT / MINING NET row
+    for row in rows:
+        if row and str(row[0]).strip().upper() in NET_LABELS and len(row) > amt_i:
+            row[amt_i] = _fmt_int(net)
+            break  # Fix first NET row only (mining section in combined P&L)
+
+    mining.update({"revenue": rev, "costs": costs, "net": net})
