@@ -231,18 +231,25 @@ For P&L BY BUSINESS LINE (/pnl) and ANY P&L request:
 - The formatter will handle filtering the display — just populate business_lines fully
 
 CRITICAL — business_lines sourcing for P&L queries:
+GOLDEN RULE: NEVER use QB's "Net Income", "Net Earnings", or any P&L summary/subtotal row for any net
+field. Every net value must be your own row arithmetic. QB's Net Income includes fair value, amortisation,
+and other excluded accounts — it will differ from your arithmetic, and that difference proves you are right.
+
 - P&L segments are MINING and OTHERS only. Hosting is not a P&L segment.
 - mining.revenue = Revenue:Realised + Revenue:Un-Realised from ProfitAndLoss
 - mining.costs = Utility-Nexbase + Rent or lease from ProfitAndLoss
-- mining.net = mining.revenue − mining.costs
+- mining.net = mining.revenue − mining.costs  (row arithmetic — see GOLDEN RULE above)
+  For SINGLE PERIOD queries: mining.net must equal the NET RESULT row in the detail_table.
   For MONTHLY queries: mining.net must equal the TOTAL row Net column in the detail_table.
-  Do NOT re-derive mining.net independently — read it from the computed TOTAL row to guarantee consistency.
-- others.revenue = any non-Mining revenue accounts from ProfitAndLoss
+- others.revenue = any account in QB's Income/Revenue section of ProfitAndLoss that is NOT
+  Revenue:Realised and NOT Revenue:Un-Realised. This includes any hosting-related income account
+  that appears in ProfitAndLoss (not Invoice data) — classify it as Others revenue, not Hosting.
 - others.costs = ALL remaining costs from ProfitAndLoss, INCLUDING Utility-AA
-- others.net = others.revenue − others.costs
+- others.net = others.revenue − others.costs  (row arithmetic — see GOLDEN RULE above)
 - total.revenue = mining.revenue + others.revenue
 - total.costs = mining.costs + others.costs
-- total.net = total.revenue − total.costs
+- total.net = total.revenue − total.costs  (row arithmetic — see GOLDEN RULE above)
+  All three net fields (mining, others, total) must agree with their respective detail_table NET RESULT rows.
 - Set hosting.revenue = 0, hosting.costs = 0, hosting.net = 0 for all P&L queries.
 
 For hosting revenue queries (Invoice query only):
@@ -283,20 +290,32 @@ Required rows (one row each, skip only if value is truly zero in QB):
                                  amount from QB, (accrued) if Journal Entry. Skip only if truly zero after fallback check.
   5. Rent or lease             → amount from QB, actual
   6. [blank separator row]
-  7. NET RESULT                → row 1 + row 2 − row 4 − row 5 (arithmetic only — NOT QB's net income figure)
-     NEVER use QB's "Net Income", "Net Earnings", or any P&L summary total for this row.
-     If Utility row used the fallback account, NET RESULT must still deduct that fallback amount.
-     ARITHMETIC SELF-CHECK (mandatory): after writing NET RESULT, re-verify it: (row 1 value) + (row 2 value) − (row 4 value) − (row 5 value). If your NET RESULT matches QB's own "Net Income" field in the raw data, that is a sign of error — QB's Net Income includes fair value, amortisation, and other excluded accounts. Recompute from the four rows only.
+  7. NET RESULT — three mandatory steps:
+     STEP A — FILTER: Identify and mentally discard QB's "Net Income" / "Net Earnings" / any P&L
+       summary or subtotal rows from the data. Do NOT read them. Do NOT use them. They do not exist
+       for this calculation.
+     STEP B — COMPUTE: Take the four row values you placed in rows 1, 2, 4, 5 above.
+       NET RESULT = (row 1 amount) + (row 2 amount) − (row 4 amount) − (row 5 amount)
+       Write this arithmetic result as the NET RESULT cell.
+     STEP C — ACCEPT THE DIFFERENCE: If your NET RESULT differs from QB's Net Income figure in the
+       data, that is expected and correct. QB's Net Income includes fair value adjustments,
+       amortisation, and other excluded accounts — those differences prove your calculation is right.
+       NEVER adjust your arithmetic result to match QB's Net Income.
   [MTM mode: do NOT add rows 8-10 to the detail_table — the formatter renders Fair Adjustment
    and NET ADJUSTMENT as a separate section using business_lines.mining fields.]
 
 For SINGLE PERIOD Others P&L:
-  One row per expense account. List ALL accounts, sorted by amount descending.
-  Add NET RESULT at bottom.
+  Revenue rows: any account in QB's Income/Revenue section that is NOT Revenue:Realised and NOT Revenue:Un-Realised.
+  Cost rows: all remaining cost/expense accounts (including Utility-AA, amortisation, etc.), sorted by amount descending.
+  NET RESULT = sum of Others revenue rows − sum of Others cost rows  (row arithmetic — see GOLDEN RULE)
 
 For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining and others"):
   Show one section per business line, each using the SINGLE PERIOD format for that line.
   Separate sections with a blank row. End with a COMBINED NET row.
+  Arithmetic (all three net rows computed from their own rows — see GOLDEN RULE above):
+    MINING NET   = Rev:Realised + Rev:Un-Realised − Utility − Rent  (Steps A/B/C from single period)
+    OTHERS NET   = sum of Others revenue rows − sum of Others cost rows
+    COMBINED NET = MINING NET + OTHERS NET
   Example structure for Mining + Others:
     Revenue:Realised         → MYR X   actual
     Revenue:Un-Realised      → MYR X   (accrued)
@@ -313,6 +332,7 @@ For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining a
   NEVER use "MINING REVENUE", "MINING COSTS", "OTHERS REVENUE", "OTHERS COSTS" as row labels —
   always use the actual QB account names.
   Hosting is NOT a P&L segment — never include a HOSTING section in a combined P&L table.
+  If a hosting-related income account appears in ProfitAndLoss data, include it in the OTHERS section.
 
 For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - report_type = "pnl_monthly"
@@ -343,13 +363,19 @@ For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
       *** HOSTING MONTH-BY-MONTH HAS NO COSTS COLUMN, NO NET COLUMN, NO UTILITY-AA COLUMN ***
       *** DO NOT add any cost or net columns to the hosting table — it is revenue-only ***
       *** DO NOT add a Notes column — notes go in key_findings prose only ***
-- CRITICAL — Net must be computed arithmetically from the row's own cells, NOT taken from QB's P&L net income:
-    Mining Net per row = row.Revenue − row.Utility-Nexbase − row.Rent-or-lease
-    TOTAL row Net = sum of individual month Nets (or equivalently, TOTAL Revenue − TOTAL Utility − TOTAL Rent)
-    DO NOT use QB's "Net Income" or "Net Earnings" figure from the ProfitAndLoss report — it includes
-    accounts outside the mining formula (fair value, amortisation, etc.) and will produce wrong totals.
-    business_lines.mining.net must equal business_lines.mining.revenue − business_lines.mining.costs exactly.
-    The "Total Costs" column = Utility-Nexbase + Rent or lease for that row.
+- CRITICAL — per-row and TOTAL row arithmetic:
+    Mining Net per row = row.Revenue − row.Utility − row.Rent (arithmetic from that row's cells only)
+    Total Costs per row = row.Utility + row.Rent
+- CRITICAL — TOTAL row must be the arithmetic sum of the individual month rows you built above:
+    TOTAL Revenue  = add up every month's Revenue cell
+    TOTAL Utility  = add up every month's Utility cell
+    TOTAL Rent     = add up every month's Rent cell
+    TOTAL Costs    = TOTAL Utility + TOTAL Rent
+    TOTAL Net      = add up every month's Net cell  (must also equal TOTAL Revenue − TOTAL Costs)
+  DO NOT use QB's annual P&L totals, annual Net Income, or any aggregate QB figure for the TOTAL row.
+  If QB's annual total for any column differs from your sum, use YOUR SUM — it is correct.
+  QB's annual figures include excluded accounts; your row-by-row sum does not.
+  business_lines.mining.net must equal the TOTAL Net value from the TOTAL row above.
 - If currency was converted, use the converted currency in column headers (e.g. "Revenue (USD)")
 
 NEVER collapse multiple rows into a single "Net Result" row as the only table row.
