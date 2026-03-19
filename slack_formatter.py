@@ -196,11 +196,21 @@ def _format_pnl_by_line(analysis: dict) -> list[dict]:
                 continue
             net_sign = "+" if net >= 0 else ""
             blocks.append(divider())
-            blocks.append(section(
+            summary = (
                 f"*{label}*\n"
                 f"Revenue: `{currency} {rev:,.0f}`   Costs: `{currency} {costs:,.0f}`   "
                 f"Net: `{net_sign}{currency} {net:,.0f}`"
-            ))
+            )
+            fair_adj = line.get("fair_adjustment", 0)
+            net_adj = line.get("net_adjustment", 0)
+            if fair_adj or net_adj:
+                fair_sign = "+" if fair_adj >= 0 else ""
+                nadj_sign = "+" if net_adj >= 0 else ""
+                summary += (
+                    f"\nFair Adj: `{fair_sign}{currency} {fair_adj:,.0f}`   "
+                    f"Net Adj: `{nadj_sign}{currency} {net_adj:,.0f}`"
+                )
+            blocks.append(section(summary))
 
         # Only show combined total when showing all lines
         if show_all:
