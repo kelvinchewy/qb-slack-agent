@@ -10,12 +10,12 @@ Takes raw QB data from qb_interpreter and produces:
 Output is structured for slack_formatter to render into Block Kit.
 """
 
-import copy
 import json
 import logging
 from datetime import datetime
 import anthropic
 from config import Config
+from table_utils import parse_amount as _parse_amount, fmt_int as _fmt_int
 
 logger = logging.getLogger(__name__)
 _client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
@@ -505,17 +505,19 @@ def analyse(interpreter_result: dict) -> dict:
     if resolved_customers:
         entity_context += f"\nResolved customer name(s) to filter for: {', '.join(resolved_customers)}"
 
-    logger.info(f"Analysing QB data for: '{question}'{' | vendors: ' + str(resolved_vendors) if resolved_vendors else ''}")
+    audit_note = interpreter_result.get("audit_correction_note", "")
+    logger.info(f"Analysing QB data for: '{question}'{' | vendors: ' + str(resolved_vendors) if resolved_vendors else ''}{' | audit-retry' if audit_note else ''}")
+
+    user_content = f"User question: {question}{entity_context}\n\nQuickBooks data:\n{data_context}"
+    if audit_note:
+        user_content += f"\n\nPREVIOUS ATTEMPT AUDIT FAILURES — fix these in your response:\n{audit_note}"
 
     try:
         response = _client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=6000,
             system=_build_analyst_system(),
-            messages=[{
-                "role": "user",
-                "content": f"User question: {question}{entity_context}\n\nQuickBooks data:\n{data_context}"
-            }],
+            messages=[{"role": "user", "content": user_content}],
         )
 
         raw = response.content[0].text.strip()
@@ -666,25 +668,6 @@ def _fallback_analysis(question: str, complexity: str, error_msg: str) -> dict:
 # These functions recompute all derived values from the actual table row data
 # so the math is always correct, regardless of what the LLM computed.
 # ---------------------------------------------------------------------------
-
-def _parse_amount(s) -> float:
-    """Parse cell values like '1,234,567', '-88,538', '+164,952', '(88,538)', 'MYR 1,234' to float."""
-    s = str(s).strip().replace("MYR", "").replace(",", "").replace("+", "").strip()
-    # Accounting parentheses notation: (88538) → -88538
-    if s.startswith("(") and s.endswith(")"):
-        s = "-" + s[1:-1]
-    if not s or s in ("-", "—", "–", ""):
-        return 0.0
-    try:
-        return float(s)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _fmt_int(v: float) -> str:
-    """Format as plain comma-separated integer (no currency prefix)."""
-    return f"{int(round(v)):,}"
-
 
 def _fix_pnl_arithmetic(analysis: dict) -> None:
     """

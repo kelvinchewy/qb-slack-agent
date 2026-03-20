@@ -2,9 +2,9 @@
 
 **Project:** QB Finance Agent
 **Owner:** Kelvin (kelvin@hashing.com)
-**Version:** 4.3
-**Last Updated:** March 16, 2026
-**Status:** Sprint 3 complete — Sprint 5 next (Anomaly Detection + Scheduled Reports)
+**Version:** 5.0
+**Last Updated:** March 20, 2026
+**Status:** Sprint 6 complete — Output Auditor built and wired
 
 ---
 
@@ -455,46 +455,117 @@ Open bills by due date + recurring transactions + cash position = projected cash
 
 ## 7. Architecture
 
-### 7.1 System Diagram
+### 7.1 Pipeline Flow
+
+Every user query — slash command, @mention, DM, or HTTP POST — passes through the same 5-stage pipeline:
 
 ```
-                            ┌──────────────────────────────────────┐
-                            │         Railway Service               │
-                            │                                       │
-  Slash command             │  ┌────────────┐                      │
-  @mention / DM             │  │  app.py     │    ┌─────────────┐  │
-  ─────────────────────────►│  │  (Bolt)     │───►│ Orchestrator │  │
-                            │  └────────────┘    └──────┬────────┘  │
-                            │                           │           │
-  HTTP (POST /query)        │  ┌────────────┐           ▼           │
-  ─────────────────────────►│  │  app.py     │  ┌───────────────┐   │
-   + X-API-Key header       │  │  (Flask)    │  │interpret_and_ │   │
-                            │  └────────────┘  │fetch()        │   │
-                            │                  │ Step 0: intent│   │
-                            │                  │ Step 0.5: name│   │
-                            │                  │ resolution    │   │
-                            │                  │ Step 1: plan  │   │
-                            │                  │ Step 2: QB API│   │
-                            │                  └───────┬───────┘   │
-                            │                          ▼           │
-                            │                  ┌───────────────┐   │
-                            │                  │ analyse()     │   │
-                            │                  │ Business line │   │
-                            │                  │ classification│   │
-                            │                  │ Accrual flags │   │
-                            │                  └───────┬───────┘   │
-                            │                          ▼           │
-                            │                  ┌───────────────┐   │
-                            │                  │ Slack Block   │   │
-                            │                  │ Kit / JSON    │   │
-                            │                  └───────────────┘   │
-                            └──────────────────────────────────────┘
+User (Slack or HTTP)
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  app.py  —  Entry point                                         │
+│  Receives Slack events / HTTP requests                          │
+│  Posts "⏳ thinking..." immediately, updates in-place           │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  orchestrator.py  —  Intent classification                      │
+│  "help" → fixed help text                                       │
+│  everything else → dynamic pipeline                             │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  report_builder.py  —  Pipeline assembler                       │
+│  Calls stages 1–4 in sequence, returns Block Kit blocks         │
+└──────┬───────────────────────────────────────────────────────────┘
+       │
+       │  STAGE 1 — FETCH
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  qb_interpreter.py  —  interpret_and_fetch()                    │
+│                                                                 │
+│  Step 0:   Classify intent (all → RETRIEVAL)                    │
+│  Step 0.5: Detect entity name → fuzzy match → exact QB name    │
+│            (Haiku — entity detection + vendor/customer resolve) │
+│  Step 1:   Generate QB API call plan                            │
+│            (Sonnet — reads question + full vendor/customer list)│
+│  Step 2:   Execute QB API calls in parallel                     │
+│            (qb_agent.py — OAuth, retries, Railway persistence)  │
+│                                                                 │
+│  Returns: raw QB data + resolved_vendors + resolved_customers   │
+└──────┬──────────────────────────────────────────────────────────┘
+       │
+       │  STAGE 2 — ANALYSE
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  qb_analyst.py  —  analyse()                                    │
+│                                                                 │
+│  Step 3:   LLM analysis (Sonnet)                                │
+│            · Business line classification (Mining / Others)     │
+│            · Accrual flagging (Journal Entries → "(accrued)")   │
+│            · Anomaly detection (missing utility, duplicate inv) │
+│            · MTM mode (fair value adjustment section)           │
+│            · CFO narrative: direct_answer, key_findings,        │
+│              proactive_flags, detail_table, business_lines      │
+│                                                                 │
+│  Step 3.5: Python arithmetic post-processor (instant, no LLM)  │
+│            · pnl_by_line: recompute NET RESULT from row data    │
+│            · pnl_monthly: recompute TOTAL row column-by-column  │
+│            · Fix business_lines.mining fields to match table    │
+│            · Fix MTM net_adjustment after net is corrected      │
+│                                                                 │
+│  Returns: analysis JSON (arithmetic guaranteed correct)         │
+└──────┬──────────────────────────────────────────────────────────┘
+       │
+       │  STAGE 3 — AUDIT
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  qb_auditor.py  —  audit()                                      │
+│                                                                 │
+│  Step 4:   Output audit (Haiku — fast, focused)                 │
+│            Checks: does the prose contradict the table?         │
+│            See §7.4 for full skill set per report type.         │
+│                                                                 │
+│  Verdict:                                                       │
+│    CLEAN   → pass through unchanged                             │
+│    FIX     → auditor rewrites direct_answer / key_findings      │
+│    RETRY   → re-call analyst (Sonnet) with error context        │
+│              injected. Max 1 retry. If retry also fails,        │
+│              deliver with ⚠️ audit flag visible.                │
+│                                                                 │
+│  Returns: audited analysis JSON                                 │
+└──────┬──────────────────────────────────────────────────────────┘
+       │
+       │  STAGE 4 — FORMAT
+       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  slack_formatter.py  —  format_dynamic_analysis()               │
+│                                                                 │
+│  Routes by report_type:                                         │
+│    pnl_by_line   → _format_pnl_by_line()                       │
+│    pnl_monthly   → _format_pnl_monthly()                       │
+│    summary_grid  → _format_summary_grid()                       │
+│    standard      → _format_standard()                           │
+│                                                                 │
+│  All routes use:                                                │
+│    _render_table() — monospace preformatted block               │
+│    _render_mtm_section() — Fair Adjustment section (MTM mode)   │
+│                                                                 │
+│  Returns: Slack Block Kit blocks (capped at 49)                 │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+Slack message posted / HTTP JSON returned
 ```
 
-**Entry points:**
-- **Slash commands** (`/nb-expenses`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`) — converted to natural language queries, fed into same pipeline
-- **@mention / DM** — natural language, same pipeline
-- **HTTP POST /query** — agent-to-agent, same pipeline, JSON response
+**Entry points — all feed into Stage 1:**
+- **Slash commands** (`/nb-expenses`, `/nb-invoices`, `/nb-vendors`, `/nb-summary`, `/nb-balance`, `/nb-pnl`, `/nb-finance`) — converted to natural language queries
+- **@mention / DM** — natural language as-is
+- **HTTP POST /query** — agent-to-agent, returns JSON instead of Block Kit
+- **APScheduler cron** — monthly Mining P&L auto-post on 3rd working day, 9AM SGT
 
 ### 7.2 Vendor/Customer Cache
 
@@ -508,38 +579,146 @@ Open bills by due date + recurring transactions + cash position = projected cash
 ### 7.3 Component Details
 
 #### `app.py` — Entry point
-- Slack Bolt (Socket Mode) + Flask (background thread)
-- Slash command handlers: `/nb-expenses`, `/invoices`, `/vendors`, `/summary`, `/balance`, `/pnl`, `/hosting`, `/finance`
+- Slack Bolt (Socket Mode) + Flask (background thread on separate port)
+- Slash command handlers: `/nb-expenses`, `/nb-invoices`, `/nb-vendors`, `/nb-summary`, `/nb-balance`, `/nb-pnl`, `/nb-finance`
 - @mention handler + DM handler
-- Interactive button handler (clarification responses)
+- Interactive button handler (vendor/customer clarification responses)
 - Flask routes: `/health`, `/query`, `/auth`, `/callback`, `/auth-status`
-- Startup: warms entity cache in background thread
+- APScheduler: daily 9AM SGT cron checks if today is 3rd working day → auto-posts monthly Mining P&L
+- Startup: warms entity cache in background thread with retry logic
 
-#### `orchestrator.py` — Routes to `dynamic` or `help`
+#### `orchestrator.py` — Intent classification
+- Routes "help" queries to fixed text
+- Routes everything else to dynamic pipeline
+- No LLM calls
 
 #### `qb_interpreter.py` — interpret_and_fetch()
-- Step 0: Classify intent (RETRIEVAL vs FORECAST_TREND)
-- Step 0.5: Detect entity name → resolve against cached vendor/customer list
-- Step 1: Generate QB API call plan (Sonnet, with full entity context injected)
-- Step 2: Execute QB API calls
-- Returns `resolved_vendors`, `resolved_customers` at top level for analyst
+- Step 0: Classify intent (all RETRIEVAL — forecast removed from scope)
+- Step 0.5: Detect entity name (Haiku) → fuzzy match against cached QB vendor/customer list (Haiku)
+- Step 1: Generate QB API call plan (Sonnet) — full entity list injected so planner uses exact QB names
+- Step 2: Execute QB API calls concurrently (ThreadPoolExecutor, max 5 workers, 1 retry on failure)
+- Returns: raw QB data + `resolved_vendors` + `resolved_customers` for analyst
 
 #### `qb_analyst.py` — analyse()
-- Receives raw QB data + resolved entity names
-- Applies business line classification (Section 2.3)
-- Flags Journal Entries as (accrued)
-- Outputs structured CFO narrative: `direct_answer`, `key_findings`, `proactive_flags`, `detail_table`
+- Step 3: LLM analysis (Sonnet, max_tokens=6000)
+  - Business line classification: Mining (Revenue:Realised, Revenue:Un-Realised, Utility-Nexbase, Rent) / Others (everything else)
+  - Accrual flagging: Journal Entry → `(accrued)`
+  - Anomaly detection: missing Utility-Nexbase, zero mining revenue, missing Northstar invoice, duplicate invoices
+  - MTM mode: when query contains "mark to market" / "mtm" / "fair value adjustment" — computes Fair Adjustment + NET ADJUSTMENT as separate section
+  - Outputs: `direct_answer`, `key_findings`, `proactive_flags`, `summary_line`, `detail_table`, `business_lines`, `report_type`, `currency`
+- Step 3.5: Python arithmetic post-processor (zero latency, no LLM)
+  - `pnl_by_line`: recomputes NET RESULT from Revenue and Cost rows in detail_table
+  - `pnl_monthly`: recomputes TOTAL row by summing individual month rows column-by-column
+  - Fixes `business_lines.mining` (revenue, costs, net) to match the corrected table
+  - Fixes MTM `net_adjustment` = corrected net + fair_adjustment
+  - **Why Python, not prompt instructions:** LLM reliably gravitates toward QB's pre-computed Net Income regardless of prompting — Python arithmetic is 100% reliable
+
+#### `qb_auditor.py` — audit()
+- Step 4: Haiku audit — checks prose vs table consistency for ALL report types
+- See §7.5 for complete skill set
+- Wired in `report_builder.py` between `analyse()` and `format_dynamic_analysis()`
+
+#### `report_builder.py` — Pipeline assembler
+- Calls `interpret_and_fetch()` → `analyse()` → `audit()` → `format_dynamic_analysis()`
+- Single function `_build_dynamic()` — the pipeline lives here
+- Error handler wraps entire pipeline
+
+#### `slack_formatter.py` — Block Kit renderer
+- `format_dynamic_analysis()`: routes by `report_type` to specialist renderers
+- `_render_table()`: monospace `rich_text_preformatted` block — true alignment across all Slack clients
+- `_render_mtm_section()`: Fair Adjustment + NET ADJUSTMENT as separate preformatted block (monthly or single-period)
+- `_format_pnl_by_line()`, `_format_pnl_monthly()`, `_format_summary_grid()`, `_format_standard()`
+- Block cap: 49 (Slack silently drops messages over 50)
 
 #### `qb_agent.py` — QB API client
-- OAuth 2.0 with automatic token refresh (proactive + on 401)
-- After every successful refresh, writes both tokens to Railway env vars via GraphQL API
-- Token expiry: access token 1 hour, refresh token 101 days (rolls on every refresh)
+- OAuth 2.0 with automatic token refresh (proactive 10 min before expiry + forced on 401)
+- Thread-safe `TokenManager` with lock to prevent concurrent refresh races
+- After every successful refresh: persists QB_REFRESH_TOKEN to Railway env vars via GraphQL (background thread)
+- Never persists QB_ACCESS_TOKEN to Railway (triggers Railway redeploy on every refresh)
+- Public interface: `get_report()`, `query()`, `get_exchange_rate()`
+- Note: contains legacy helper methods (`get_quarterly_summary`, `get_balance_sheet`, `get_pnl`, `get_cash_position`) from old fixed-route pipeline — these are dead code, not called by current dynamic pipeline
+
+#### `qb_auth.py` — Legacy OAuth (not used in production)
 
 #### OAuth
 | Action | URL |
 |--------|-----|
 | Re-authorize QuickBooks | `https://qb-slack-agent-production.up.railway.app/auth` |
 | Check token status | `https://qb-slack-agent-production.up.railway.app/auth-status` |
+
+---
+
+### 7.4 Component Skills Audit
+
+Current state of each file vs what the PRD specifies:
+
+| File | PRD Role | Actual Role | Gap |
+|------|----------|-------------|-----|
+| `app.py` | Entry point, 7 slash commands, Bolt + Flask | ✅ Matches + APScheduler monthly cron (Sprint 5) | None |
+| `orchestrator.py` | help vs dynamic routing | ✅ Matches exactly, no LLM | None |
+| `qb_interpreter.py` | Entity detect → plan → execute | ✅ Matches + entity cache management | None |
+| `qb_analyst.py` | QB data → CFO narrative | ✅ Matches + MTM mode + arithmetic post-processor + anomaly rules | MTM mode not documented until this version |
+| `qb_agent.py` | QB API client, OAuth, Railway persistence | ✅ Core matches | Dead code: legacy fixed-route methods unused by current pipeline |
+| `report_builder.py` | Pipeline assembler | ✅ Matches — audit() wired between analyse() and format_dynamic_analysis() | None |
+| `slack_formatter.py` | Block Kit renderer | ✅ Matches + MTM section renderer | MTM renderer not documented until this version |
+| `qb_auditor.py` | Output audit layer | ✅ Built — Sprint 6 complete | None |
+| `qb_auth.py` | Legacy OAuth, not used in prod | ✅ Matches | None |
+| `mock_data.py` | Mock QB responses (MOCK_MODE=true) | ✅ Matches | None |
+
+---
+
+### 7.5 Auditor Skill Set
+
+`qb_auditor.py` uses Haiku (fast, cheap) to check whether the analyst's prose contradicts the table data. The Python post-processor (Stage 3.5) handles arithmetic. The auditor handles everything else — qualitative claims, figure quoting, cross-field consistency.
+
+**What the auditor checks, by report type:**
+
+#### P&L single-period (`pnl_by_line`)
+| Check | Example failure | Action |
+|-------|----------------|--------|
+| `direct_answer` NET RESULT matches detail_table NET RESULT row | Prose: "−528,000" but table: "164,952" | **FIX** — rewrite prose |
+| % figures in `key_findings` match `% of Total` column | "84% of costs" but table says "82.9%" | **FIX** — rewrite finding |
+| Sign correct — if net < 0 prose says "loss" not "profit" | "Mining generated a profit of MYR −45,231" | **FIX** |
+| `business_lines.mining.net` matches NET RESULT row | Badges show different number from table | **FIX** |
+
+#### P&L monthly (`pnl_monthly`)
+| Check | Example failure | Action |
+|-------|----------------|--------|
+| `direct_answer` total net matches TOTAL row Net cell | Prose: "−528,000" but TOTAL row: "164,952" | **FIX** |
+| Best/worst month cited matches actual best/worst in Net column | "June was worst at −215,035" but Jun shows −51,035 | **FIX** |
+| TOTAL row is internally consistent (Revenue − Costs = Net) | TOTAL: Rev 2.8M − Costs 2.6M ≠ Net 164K | **FIX** (override TOTAL Net = Rev − Costs) |
+
+#### Balance sheet (`standard` with BalanceSheet data)
+| Check | Example failure | Action |
+|-------|----------------|--------|
+| Assets = Liabilities + Equity (accounting identity) | Assets 4.2M ≠ Liab 1.8M + Equity 1.9M = 3.7M | **RETRY** — LLM misread QB JSON sections |
+| `direct_answer` figures match table | Prose: "total assets MYR 3.7M" but table: "4.2M" | **FIX** |
+
+#### Bills / invoices / vendor rankings (`standard`)
+| Check | Example failure | Action |
+|-------|----------------|--------|
+| Grand Total = Unpaid Total + Paid Total | Grand 98,430 ≠ Unpaid 98,400 + Paid 30 | **FIX** |
+| `direct_answer` amount matches Grand Total | Prose: "MYR 90,000 outstanding" but table: "98,400" | **FIX** |
+
+#### Summary grid (`summary_grid`)
+| Check | Example failure | Action |
+|-------|----------------|--------|
+| total.net = mining.net + others.net | Total 164K ≠ Mining 183K + Others −19K | **FIX** |
+| `direct_answer` figures match business_lines | Prose: "net profit of 200K" but total.net = 164K | **FIX** |
+
+**Verdict → action mapping:**
+
+| Verdict | Trigger | Action |
+|---------|---------|--------|
+| `clean` | No issues found | Pass through unchanged |
+| `fix` | Prose contradicts table (figures, signs, claims) | Auditor rewrites `direct_answer` + `key_findings` only — table data untouched |
+| `retry` | Structural error (BS equation, missing section) requiring access to raw QB data | Re-call Sonnet analyst with auditor findings injected as context. Max 1 retry. |
+| `flagged` | Retry also failed audit | Deliver with ⚠️ audit note in `proactive_flags`. Never loop. |
+
+**What the auditor does NOT do:**
+- Re-check arithmetic (Python post-processor already handles this)
+- Modify individual table row amounts (no access to raw QB data)
+- Block delivery unless explicitly unresolvable
 
 ---
 

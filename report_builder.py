@@ -31,6 +31,7 @@ def build_report(intent_data: dict) -> list[dict]:
 def _build_dynamic(intent_data: dict) -> list[dict]:
     from qb_interpreter import interpret_and_fetch
     from qb_analyst import analyse
+    from qb_auditor import audit
 
     question = intent_data.get("original_question", "")
     if not question:
@@ -38,4 +39,5 @@ def _build_dynamic(intent_data: dict) -> list[dict]:
 
     interpreter_result = interpret_and_fetch(question)
     analysis = analyse(interpreter_result)
+    analysis = audit(analysis, interpreter_result)
     return fmt.format_dynamic_analysis(analysis)
