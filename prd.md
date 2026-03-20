@@ -2,9 +2,9 @@
 
 **Project:** QB Finance Agent
 **Owner:** Kelvin (kelvin@hashing.com)
-**Version:** 5.0
+**Version:** 5.1
 **Last Updated:** March 20, 2026
-**Status:** Sprint 6 complete — Output Auditor built and wired
+**Status:** Sprint 7 in progress — vendor bill completeness + zero-amount filter fixes deployed
 
 ---
 
@@ -157,7 +157,7 @@ Shows vendor expenses — what we owe and what we paid. Combines QB **Bills** (A
 
 **Vendor scope:** Only transactions where the payee is a QB Vendor are included (`VendorRef` on Bills, `EntityRef.type == "Vendor"` on Purchases). Non-vendor payees (employees, customers, blank petty cash entries) are excluded automatically — they don't match any vendor in the list.
 
-Always fetches: (1) ALL currently unpaid Bills regardless of age, (2) recent Bills in the date range, (3) recent Purchases with a QB Vendor payee in the date range. Deduplicates Bills by Id.
+Always fetches: (1) ALL currently unpaid Bills regardless of age, (2) ALL Bills in the date range (paid + unpaid, no Balance filter), (3) all Purchases with a QB Vendor payee in the date range. Merges calls 1+2 (deduplicate by Id), then applies vendor filter to the combined pool — never per-call. Zero-amount records (TotalAmt=0 AND Balance=0) excluded. Default date range when none specified: 2024-01-01 to today.
 
 ```
 /nb-expenses                             → all vendors, past 3 months + all currently unpaid
@@ -393,15 +393,18 @@ All slash commands have natural language equivalents via `@Nexbase Finance Agent
 
 **Vendor scope:** Only QB Vendor payees are shown. `VendorRef` on Bills is always a vendor. For Purchases, only include records where `EntityRef.type == "Vendor"` — this excludes petty cash, employee reimbursements, and any non-vendor payees that would never appear in the vendor list.
 
-**Three calls always generated:**
+**Three calls always generated — including vendor-specific queries (NEVER skip calls 2 or 3):**
 1. `SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate ASC MAXRESULTS 100` — ALL currently unpaid Bills, any age
-2. `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100` — recent Bills (paid + unpaid)
-3. `SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100` — recent Purchases (analyst filters to Vendor payees only)
+2. `SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500` — ALL Bills in range, paid AND unpaid (no Balance filter). Default range if user gives no date: `2024-01-01` to today.
+3. `SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500` — All Purchases in range. Same default range as call 2.
 
-**Analyst processing:**
-- Merges calls 1 and 2, deduplicating by Bill `Id`
-- Appends Purchases from call 3 where `EntityRef.type == "Vendor"`
-- Filters to `resolved_vendors` if a specific vendor was requested
+**Critical:** Calls 2 and 3 must always run even for vendor-specific queries — they are the only source of paid bills. Skipping them causes paid bills to silently disappear.
+
+**Analyst processing — order is mandatory:**
+1. Merge calls 1 and 2 into one pool, deduplicating by Bill `Id`
+2. Append Purchases from call 3 where `EntityRef.type == "Vendor"`
+3. **Only after steps 1–2 are complete:** if `resolved_vendors` is set, filter the full merged pool by vendor name. Never filter per-call before merging — this drops records.
+- Exclude any Bill or Purchase where `TotalAmt = 0` AND `Balance = 0` — these are data-entry artefacts with no financial impact
 - Status: `Balance > 0` + `DueDate < today` → Overdue; `Balance > 0` → Unpaid; `Balance = 0` → Paid; Purchase → always Paid
 - Sort: Overdue/Unpaid first (by DueDate ASC), then Paid (by TxnDate DESC)
 - Reports Unpaid Total and Paid Total separately, then Grand Total
@@ -862,6 +865,29 @@ The `query` field accepts plain English — same as asking the bot in Slack. See
 { "status": "error", "error": "Missing 'query' field" }
 ```
 
+### Timeout & Latency
+
+Every `/query` call chains 4–5 LLM calls plus QB API calls:
+
+| Stage | Model | Typical latency |
+|-------|-------|----------------|
+| Entity detection | Haiku | ~0.5s |
+| Vendor name resolution | Haiku | ~0.5s |
+| Query planning | Sonnet | ~3–5s |
+| Data analysis | Sonnet | ~5–10s |
+| Output audit | Haiku | ~1–2s |
+| **Total (typical)** | | **~10–18s** |
+| **Total (worst case — audit retry)** | | **~25–35s** |
+
+**Orchestrator agents calling `/query` MUST set HTTP timeout ≥ 45 seconds.** The 3-second default on most HTTP clients will time out on nearly every request.
+
+```python
+# Correct — httpx / requests
+response = httpx.post(url, json=payload, headers=headers, timeout=45.0)
+```
+
+**On timeout:** No partial response is returned. Retry the same query — the pipeline is stateless and idempotent. If timeouts persist for a specific query type (e.g. large bill date ranges), narrow the date range to reduce QB result payload size.
+
 ### Example queries for the HTTP API
 
 Use the same natural language as Slack. Some useful patterns:
@@ -1089,6 +1115,11 @@ Expected for The Hashing Company: **$15–40/month**.
 | Mar 2026 | "COMBINED NET" added to formatter row filter passthrough | Combined multi-line P&L net row was being silently stripped by business-line keyword filter |
 | Mar 2026 | max_tokens raised to 6000 | Prompt growth from detail table specs + currency rules exceeded 4000 token output budget |
 | Mar 2026 | Table rendering upgraded to Slack native `table` block | Monospace padding in section blocks broke alignment on columns with varying digit counts (e.g. MYR 1,200 vs MYR 110,000); native table block provides right-aligned numeric columns with no manual padding |
+| Mar 2026 | Call (b) always runs even for vendor-specific queries; default date range 2024-01-01 to today when no date given | Without this, vendor-only queries (no date) only executed call (a) — unpaid bills only — making paid bills invisible. Root cause: "Do NOT use default range" instruction left the LLM with nothing to fill in when user gave no dates, so it skipped call (b) entirely. |
+| Mar 2026 | MAXRESULTS raised to 500 on Bill and Purchase date-range calls | 100-record cap truncated full-year vendor queries. 500 is safe within QB V3 API limit of 1000. |
+| Mar 2026 | Vendor filter applied after merging all three calls, never per-call | Per-call filtering caused records present in only one result set to be dropped when deduplication ran. Merge-then-filter is the correct order. |
+| Mar 2026 | Zero-amount bills excluded (TotalAmt=0 AND Balance=0) | Wrong-vendor entries and data-entry artefacts were polluting bill tables with MYR 0 rows attributed to the wrong vendor name (e.g. Kuching Web Design showed instead of VINTECH PLT). These have no financial impact and should never appear in CFO-facing output. |
+| Mar 2026 | HTTP /query timeout guidance set at 45s minimum | Pipeline chains 4–5 LLM calls; default HTTP timeouts (3–5s) cause near-universal timeouts. Orchestrator agents must configure timeout ≥ 45s explicitly. |
 
 ---
 

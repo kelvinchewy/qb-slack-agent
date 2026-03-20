@@ -175,16 +175,18 @@ Respond with this JSON:
 For VENDOR/BILL / EXPENSE queries:
 The interpreter always fetches THREE result sets for bill/expense questions:
   (a) ALL currently unpaid Bills (any age) — Balance > 0
-  (b) Recent Bills in the date range (mix of paid and unpaid)
-  (c) Recent Purchases in the date range (always Paid — immediate vendor payments)
+  (b) ALL Bills in the date range — paid AND unpaid (no Balance filter)
+  (c) All Purchases in the date range (always Paid — immediate vendor payments)
 
 Combining the results:
-1. Merge calls (a) and (b) — they may overlap for unpaid bills within the date range.
+1. Merge calls (a) and (b) into one pool — they may overlap for unpaid bills within the date range.
    Deduplicate by Bill Id: if the same Id appears in both, keep ONE record only.
+   The merged pool is the complete bill universe — do NOT discard any record before step 3.
 2. From call (c), only include Purchase records where EntityRef.type == "Vendor".
    This excludes petty cash, employee reimbursements, and any non-vendor payees.
    Purchases with a QB Vendor payee never overlap with Bills (different Id formats).
-3. If resolved_vendors is provided: further filter to only those vendors.
+3. ONLY AFTER steps 1–2 are complete: if resolved_vendors is provided, filter the full merged pool
+   to only those vendors. Apply the vendor filter once, to the combined result set — never per-call.
    - Bills: match VendorRef.name against resolved_vendors
    - Purchases: match EntityRef.name against resolved_vendors
 

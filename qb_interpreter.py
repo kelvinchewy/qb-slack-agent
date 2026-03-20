@@ -172,10 +172,14 @@ DECISION RULES:
       SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate ASC MAXRESULTS 100
    b. ALL Bills in the user-requested date range (paid AND unpaid — no Balance filter):
       SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500
-      Use the exact start/end dates from the user's question. Do NOT use the default 3-month range here.
+      Use the exact start/end dates from the user's question.
+      If the user gives NO date range, default to: TxnDate >= '2024-01-01' AND TxnDate <= today.
+      NEVER skip this call even for vendor-specific queries — it is required to capture paid bills.
    c. All Purchases in the user-requested date range (immediate payments — always paid):
       SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500
       Use the exact start/end dates from the user's question.
+      If the user gives NO date range, default to: TxnDate >= '2024-01-01' AND TxnDate <= today.
+      NEVER skip this call even for vendor-specific queries.
    NEVER filter by VendorRef.name or EntityRef.name in SQL — analyst filters by vendor name from results.
    Calls (a) and (b) may overlap for unpaid bills in the date range — analyst deduplicates by Id.
 7. All bills for a period → same as rule 6
