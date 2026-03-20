@@ -798,6 +798,12 @@ def _fix_single_period_net(headers: list, rows: list, mining: dict) -> None:
         else:
             costs += v
 
+    if rev == 0 and costs > 0:
+        # No "Revenue:" prefixed rows found — this is an Others P&L (accounts like
+        # "Billable Expense Income", "Services", etc. — no Revenue: prefix).
+        # Can't split revenue from costs reliably; leave the table untouched.
+        return
+
     net = rev - costs
 
     # Fix the NET RESULT / MINING NET row

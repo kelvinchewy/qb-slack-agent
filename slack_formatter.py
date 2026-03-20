@@ -3,6 +3,8 @@ Slack Block Kit formatter helpers.
 Converts financial data into clean, readable Slack messages.
 """
 
+from table_utils import parse_amount
+
 
 def fmt_currency(amount: int | float) -> str:
     if amount < 0:
@@ -296,13 +298,10 @@ def _format_pnl_monthly(analysis: dict) -> list[dict]:
         hdrs = detail_table.get("headers", [])
         rows = detail_table.get("rows", [])
         if hdrs and rows:
+            mining = (business_lines or {}).get("mining", {})
+            mtm_extra = _build_mtm_inline_rows(hdrs, rows, mining)
             blocks.append(divider())
-            blocks.extend(_render_table(hdrs, rows))
-
-    # MTM adjustment section (monthly)
-    if business_lines:
-        mining = business_lines.get("mining", {})
-        blocks.extend(_render_mtm_section(mining, currency))
+            blocks.extend(_render_table(hdrs, rows + mtm_extra))
 
     if business_lines:
         total = business_lines.get("total")
@@ -365,6 +364,63 @@ def _format_summary_grid(analysis: dict) -> list[dict]:
     blocks.extend(_findings_flag_blocks(key_findings, proactive_flags))
     blocks.append(_footer_block(data_completeness, data_note))
     return blocks
+
+
+def _build_mtm_inline_rows(hdrs: list, rows: list, mining: dict) -> list:
+    """
+    Returns extra rows to append to the monthly P&L table when MTM mode is active.
+    Appends after the TOTAL row:
+      (blank)
+      ADJUSTMENT
+      <month>  <fair_adj>  -  -  -  -
+      (blank)
+      NET TOTAL  <rev+adj>  <costs...>  <net_adj>
+    Returns [] if no adjustment data.
+    """
+    fair_adj = mining.get("fair_adjustment") or 0
+    net_adj = mining.get("net_adjustment") or 0
+    fair_adj_rows = mining.get("fair_adjustment_rows") or []
+    if not fair_adj or not fair_adj_rows:
+        return []
+
+    col_count = len(hdrs)
+    rev_col = 1          # Revenue is always col 1 in monthly table
+    net_col = col_count - 1  # Net is always last col
+
+    # Find TOTAL row for base values
+    total_row = next((r for r in rows if r and str(r[0]).strip().upper() == "TOTAL"), None)
+
+    extra = []
+    extra.append([""] * col_count)                              # blank separator
+    extra.append(["ADJUSTMENT"] + [""] * (col_count - 1))       # section label
+
+    for r in fair_adj_rows:
+        if str(r[0]).strip().upper() == "TOTAL":
+            continue
+        month_fair = r[1]
+        row = [r[0]] + ["-"] * (col_count - 1)
+        row[rev_col] = f"{int(round(month_fair)):,}" if month_fair != 0 else "-"
+        extra.append(row)
+
+    extra.append([""] * col_count)                              # blank separator
+
+    # NET TOTAL row
+    net_total = ["-"] * col_count
+    net_total[0] = "NET TOTAL"
+    if total_row:
+        for i in range(1, col_count):
+            base = parse_amount(total_row[i]) if i < len(total_row) else 0
+            if i == rev_col:
+                net_total[i] = f"{int(round(base + fair_adj)):,}"
+            elif i == net_col:
+                net_total[i] = f"{int(round(net_adj)):,}"
+            else:
+                net_total[i] = f"{int(round(base)):,}" if base != 0 else "0"
+    else:
+        net_total[rev_col] = f"{int(round(fair_adj)):,}"
+        net_total[net_col] = f"{int(round(net_adj)):,}"
+    extra.append(net_total)
+    return extra
 
 
 def _render_mtm_section(mining: dict, currency: str) -> list[dict]:
