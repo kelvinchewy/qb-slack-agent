@@ -170,10 +170,12 @@ DECISION RULES:
    Always generate THREE calls:
    a. ALL currently unpaid Bills (any age):
       SELECT * FROM Bill WHERE Balance > '0' ORDERBY DueDate ASC MAXRESULTS 100
-   b. Recent paid Bills in the date range:
-      SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
-   c. Recent Purchases in the date range (immediate payments — always paid):
-      SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 100
+   b. ALL Bills in the user-requested date range (paid AND unpaid — no Balance filter):
+      SELECT * FROM Bill WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500
+      Use the exact start/end dates from the user's question. Do NOT use the default 3-month range here.
+   c. All Purchases in the user-requested date range (immediate payments — always paid):
+      SELECT * FROM Purchase WHERE TxnDate >= 'X' AND TxnDate <= 'Y' ORDERBY TxnDate DESC MAXRESULTS 500
+      Use the exact start/end dates from the user's question.
    NEVER filter by VendorRef.name or EntityRef.name in SQL — analyst filters by vendor name from results.
    Calls (a) and (b) may overlap for unpaid bills in the date range — analyst deduplicates by Id.
 7. All bills for a period → same as rule 6
@@ -241,6 +243,21 @@ DECISION RULES:
       {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-11-01' AND TxnDate <= '2025-11-30' ORDERBY TxnDate DESC MAXRESULTS 100"}}
       {{"type": "query", "sql": "SELECT * FROM Invoice WHERE TxnDate >= '2025-12-01' AND TxnDate <= '2025-12-31' ORDERBY TxnDate DESC MAXRESULTS 100"}}
 
+18. For ANY ProfitAndLoss query spanning 2 or more calendar months — even without "breakdown by month" —
+    use one call per calendar month (same as Rule 17). The analyst will determine whether to present
+    a monthly table or an aggregate view based on the question wording.
+    Single-month P&L queries (e.g. "P&L Jan 2026") remain a single call.
+
+    Example — "mining P&L Jan 2025 to date" (no breakdown requested, 15 months) → 15 ProfitAndLoss calls:
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-01-01", "end_date": "2025-01-31"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2025-02-01", "end_date": "2025-02-28"}}}}
+      ... (one per month through today)
+
+    Example — "P&L Q1 2026" (3 months, no breakdown) → 3 ProfitAndLoss calls:
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-01-01", "end_date": "2026-01-31"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-02-01", "end_date": "2026-02-28"}}}}
+      {{"type": "report", "report_name": "ProfitAndLoss", "params": {{"start_date": "2026-03-01", "end_date": "2026-03-31"}}}}
+
 CHAINING RULE:
 When question asks who/which vendor/payee is behind an expense category, always chain:
   Call 1: ProfitAndLoss for the date range (gets the category total)
@@ -267,6 +284,8 @@ Examples:
 - "hosting revenue Jan 2026 in USD" → Invoice query (Jan 2026) + ExchangeRate call (USD, 2026-01-31)
 - "show mining P&L in USD" → ProfitAndLoss call + ExchangeRate call (USD, last day of period)
 - "mining P&L Oct to Feb breakdown by month" → 5 separate ProfitAndLoss calls, one per month
+- "mining P&L Jan 2025 to date" → N separate ProfitAndLoss calls, one per month (aggregate view)
+- "P&L Q1 2026" → 3 separate ProfitAndLoss calls, one per month (aggregate view)
 - "hosting revenue Oct to Feb breakdown by month" → 3 Invoice queries, one per month
 - "show monthly P&L last quarter" → 3 separate ProfitAndLoss calls, one per month in the quarter
 - "S And E bills month by month last quarter" → 3 separate Bill queries, one per month

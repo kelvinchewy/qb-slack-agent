@@ -196,6 +196,9 @@ Status logic:
 - Purchase → always "Paid" (immediate payment — no Balance field)
 
 Detail table format: Date | Ref # | Vendor | Amount (MYR) | Status
+- Exclude any Bill or Purchase where TotalAmt = 0 AND Balance = 0 — these are data-entry
+  artefacts (wrong-vendor entries, credits, or duplicate records) with no financial impact.
+  Do NOT include them in the table or totals.
 - Date = TxnDate (YYYY-MM-DD) for both Bills and Purchases
 - Ref # = DocNumber if present and non-empty, else the QB Id; cap at 14 characters
 - Vendor = VendorRef.name (Bill) or EntityRef.name (Purchase); if longer than 22 chars, truncate to 21 and append "…" (22 total)
@@ -338,6 +341,26 @@ For COMBINED / MULTI-LINE P&L (multiple lines requested together, e.g. "mining a
   always use the actual QB account names.
   Hosting is NOT a P&L segment — never include a HOSTING section in a combined P&L table.
   If a hosting-related income account appears in ProfitAndLoss data, include it in the OTHERS section.
+
+For MULTI-MONTH AGGREGATE P&L (multiple ProfitAndLoss calls, user did NOT ask for monthly breakdown):
+- report_type = "pnl_by_line"
+- Each call result is a separate monthly P&L — apply the per-month fallback rules below to each month
+  before summing (same fallback rules as month-by-month, lines below)
+- Sum each line across ALL months:
+    Revenue:Realised    → total across all months
+    Revenue:Un-Realised → total across all months
+    Utility             → total across all months; apply per-month fallback (use "Utilit*" account
+                          if "Nexbase" absent that month); consolidate into ONE row — use
+                          "Utility - Nexbase" as the row label if it appears in ANY month,
+                          otherwise use the fallback name from the latest month. Flag any months
+                          that used a different fallback name in key_findings.
+    Rent or lease       → total across all months
+- Produce a SINGLE AGGREGATE TABLE (same format as SINGLE PERIOD):
+    Columns: Account | Amount (MYR) | Type | % of Total
+    Rows:    Revenue:Realised, Revenue:Un-Realised, [blank], Utility row, Rent or lease, [blank], NET RESULT
+    NET RESULT = sum of revenue rows − sum of cost rows  (Steps A/B/C — NEVER use QB's Net Income)
+- business_lines.mining: set revenue/costs/net from the summed figures
+- direct_answer: state the aggregate totals and full date range (e.g. "Jan 2025 to Mar 2026")
 
 For MONTH-BY-MONTH P&L (multiple ProfitAndLoss calls — one per month):
 - report_type = "pnl_monthly"
