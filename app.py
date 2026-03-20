@@ -62,14 +62,15 @@ def strip_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def _run_pipeline(question: str) -> tuple[list, str]:
+def _run_pipeline(question: str, on_status=None) -> tuple[list, str]:
     """
     Core pipeline: question → interpreter → analyst → formatter.
     Returns (blocks, plain_text_fallback).
+    on_status(text) is called before each slow stage to update the thinking message.
     """
     intent_data = classify_intent(question)
     intent_data["original_question"] = question
-    blocks = build_report(intent_data)
+    blocks = build_report(intent_data, on_status=on_status)
     return blocks, intent_data.get("intent", "query")
 
 
@@ -97,7 +98,14 @@ def process_and_reply(client, channel: str, thread_ts: str | None, user_message:
         thinking_ts = thinking_resp.get("ts")
         logger.info(f"Processing: '{clean_text}'")
 
-        blocks, intent = _run_pipeline(clean_text)
+        def on_status(text):
+            if thinking_ts:
+                try:
+                    client.chat_update(channel=channel, ts=thinking_ts, text=text)
+                except Exception:
+                    pass
+
+        blocks, intent = _run_pipeline(clean_text, on_status=on_status)
 
         if thinking_ts:
             client.chat_update(
@@ -133,7 +141,14 @@ def _slash_worker(respond, natural_language_query: str, thinking_done: bool = Fa
         logger.info(f"Slash command query: '{natural_language_query}'")
         if not thinking_done:
             respond("⏳ Looking into that, give me a moment...")
-        blocks, intent = _run_pipeline(natural_language_query)
+
+        def on_status(text):
+            try:
+                respond(text, replace_original=True)
+            except Exception:
+                pass
+
+        blocks, intent = _run_pipeline(natural_language_query, on_status=on_status)
         respond(blocks=blocks, text=f"Finance report: {intent}", replace_original=True)
     except Exception as e:
         logger.error(f"Slash command error: {e}")
